@@ -80,6 +80,8 @@ final class KillAdviceListener extends AdviceListener {
             } else {
                 // DuplicateKey：该行本轮已被其他节点触发，记忆后放行（不再反复撞库）
                 preemptedLines.add(lineKey);
+                FaultLogger.info("line already preempted in this round (tag=" + tag
+                        + "), release execution: " + lineKey);
             }
         } catch (Throwable t) {
             // 抢占/记录失败绝不能破坏业务方法本身的执行

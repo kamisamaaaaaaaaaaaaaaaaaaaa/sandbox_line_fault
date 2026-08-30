@@ -33,5 +33,6 @@ public final class SchemaInitializer {
                     "fault_sandbox schema not ready (run common/src/main/resources/schema.sql manually): "
                             + e.getMessage(), e);
         }
+        FaultLogger.info("schema check OK: all 4 tables exist");
     }
 }

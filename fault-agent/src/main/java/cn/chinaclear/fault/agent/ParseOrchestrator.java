@@ -83,11 +83,13 @@ final class ParseOrchestrator {
 
         if ("failed".equals(status)) {
             if (recordDao.claimForReparse(unitId, MachineInfo.hostname(), MachineInfo.ip())) {
+                FaultLogger.info("re-parse claimed (previous FAILED): unitId=" + unitId + " source=" + unit.sourceJar);
                 inFlight.add(unitId);
                 storeUnit(recordDao, methodDao, unit, unitId, bootJarPath);
                 removeInFlight(inFlight, unitId);
+            } else {
+                FaultLogger.info("re-parse claimed by other node first, skip: unitId=" + unitId);
             }
-            // 抢占失败 = 被其他节点抢先，由对方负责
             return unitId;
         }
 
@@ -97,13 +99,18 @@ final class ParseOrchestrator {
         boolean orphan = System.currentTimeMillis() - existing.getUpdatedAt().getTime()
                 >= (long) config.orphanThresholdMinutes() * 60000L;
         if (ownPending || orphan) {
+            String reason = ownPending ? "pending left by THIS machine (interrupted)" : "orphan pending on other node (timeout)";
             if (recordDao.claimForReparse(unitId, MachineInfo.hostname(), MachineInfo.ip())) {
+                FaultLogger.info("re-parse claimed (" + reason + "): unitId=" + unitId + " source=" + unit.sourceJar);
                 inFlight.add(unitId);
                 storeUnit(recordDao, methodDao, unit, unitId, bootJarPath);
                 removeInFlight(inFlight, unitId);
+            } else {
+                FaultLogger.info("claim lost to other node (" + reason + "), skip: unitId=" + unitId);
             }
         } else {
-            FaultLogger.info("unit pending on other node, skip: source=" + unit.sourceJar + " unitId=" + unitId);
+            FaultLogger.info("unit pending on other node (in progress), skip: source=" + unit.sourceJar
+                    + " unitId=" + unitId);
         }
         return unitId;
     }
