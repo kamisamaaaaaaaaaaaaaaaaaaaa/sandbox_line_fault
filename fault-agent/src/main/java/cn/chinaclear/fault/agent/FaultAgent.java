@@ -31,20 +31,15 @@ public final class FaultAgent {
     public static void premain(String agentArgs, Instrumentation inst) {
         FaultLogger.init("fault-agent.log");
         FaultConfig config = FaultConfig.load(agentArgs);
-        if (!config.enabled()) {
-            FaultLogger.info("agent.enabled=false -> skip all, release application startup");
-            return;
-        }
         long pid = currentPid();
         long deadline = System.currentTimeMillis() + config.premainTimeoutMs();
         FaultLogger.info("premain start: pid=" + pid + ", budget=" + config.premainTimeoutMs() + "ms"
                 + ", machine=" + MachineInfo.hostname() + "/" + MachineInfo.ip());
         try {
-            String bootJar = BootJarLocator.locate(config);
+            String bootJar = BootJarLocator.locate();
             if (bootJar == null) {
                 throw HardProtectException.exception("PARSE",
-                        "bootJar not located (check -jar arg / agentArgs bootJar= / config bootJar.path)",
-                        null, null, null);
+                        "bootJar not located: application must be started with -jar", null, null, null);
             }
             try {
                 SchemaInitializer.checkTables(config);

@@ -67,10 +67,6 @@ public final class FaultConfig {
         }
     }
 
-    public boolean enabled() {
-        return getBoolean("agent.enabled", true);
-    }
-
     /** 故障库连接：显式 jdbc.url 优先；否则用 jdbc.host（默认 127.0.0.1）拼接 */
     public String jdbcUrl() {
         String override = get("jdbc.url", "");
@@ -84,11 +80,11 @@ public final class FaultConfig {
     }
 
     public String jdbcUsername() {
-        return get("jdbc.username", "root");
+        return require("jdbc.username");
     }
 
     public String jdbcPassword() {
-        return get("jdbc.password", "root123");
+        return require("jdbc.password");
     }
 
     /** BOOT-INF/lib 白名单：jar 文件名（精确或前缀匹配），逗号分隔 */
@@ -103,7 +99,7 @@ public final class FaultConfig {
     }
 
     public String sandboxShPath() {
-        return get("sandbox.sh.path", "/home/lys2/sandbox/bin/sandbox.sh");
+        return require("sandbox.sh.path");
     }
 
     /** premain 全程总预算：解析 + 落库 + 挂载 */
@@ -111,13 +107,17 @@ public final class FaultConfig {
         return getLong("premain.timeout.ms", 600000L);
     }
 
-    /** 非 -jar 方式启动时的 bootJar 兜底路径 */
-    public String bootJarPath() {
-        return get("bootJar.path", "");
-    }
-
     /** 异机 pending 孤儿判定阈值（分钟） */
     public int orphanThresholdMinutes() {
         return getInt("orphan.threshold.minutes", 10);
+    }
+
+    /** 必填配置缺失即抛错（走硬保护，避免带错误配置运行） */
+    private String require(String key) {
+        String v = get(key, "");
+        if (v.isEmpty()) {
+            throw new IllegalStateException("required config missing: " + key);
+        }
+        return v;
     }
 }

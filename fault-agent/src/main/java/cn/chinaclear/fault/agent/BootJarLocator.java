@@ -11,11 +11,10 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * bootJar 定位兜底链：
+ * bootJar 定位兜底链（应用必须以 -jar 方式启动）：
  * 1) sun.java.command 首个 token（JDK9+ 的 -jar 旗标不出现在 inputArguments 中）；
  * 2) /proc/self/cmdline（Linux，null 分隔的完整命令行，找 -jar 后继参数）；
- * 3) RuntimeMXBean inputArguments（JDK 8 行为：包含 -jar 及路径）；
- * 4) agentArgs / config.properties 的 bootJar.path。
+ * 3) RuntimeMXBean inputArguments（JDK 8 行为：包含 -jar 及路径）。
  */
 final class BootJarLocator {
 
@@ -23,7 +22,7 @@ final class BootJarLocator {
     }
 
     /** 返回 bootJar 绝对路径；定位失败返回 null（调用方走硬保护） */
-    static String locate(FaultConfig config) {
+    static String locate() {
         // 1) sun.java.command
         try {
             String command = System.getProperty("sun.java.command");
@@ -85,11 +84,7 @@ final class BootJarLocator {
             FaultLogger.warn("read jvm input arguments failed: " + t.getMessage());
         }
 
-        // 4) 配置兜底
-        String fallback = config.bootJarPath();
-        if (!fallback.isEmpty()) {
-            return absolutizeExisting(fallback);
-        }
+        FaultLogger.warn("bootJar not located: application must be started with -jar");
         return null;
     }
 
