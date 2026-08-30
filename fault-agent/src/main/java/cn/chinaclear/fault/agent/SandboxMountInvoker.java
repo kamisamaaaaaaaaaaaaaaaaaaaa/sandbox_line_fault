@@ -25,15 +25,16 @@ final class SandboxMountInvoker {
         if (remain <= 0) {
             throw HardProtectException.timeout("MOUNT", "no time left for mount", null, null, bootJarPath);
         }
+        String home = config.sandboxHome();
+        String script = home + "/bin/sandbox.sh";
         String ids = FaultAgent.joinIds(unitIds);
         List<String> command = Arrays.asList(
-                "bash", config.sandboxShPath(),
+                "bash", script,
                 "-p", String.valueOf(pid),
                 "-d", "fault-module/inject?id=" + ids);
         FaultLogger.info("mount cmd: " + command);
 
-        java.io.File scriptFile = new java.io.File(config.sandboxShPath());
-        java.io.File workDir = scriptFile.getAbsoluteFile().getParentFile();
+        java.io.File workDir = new java.io.File(home, "bin");
         Process process = null;
         try {
             process = new ProcessBuilder(command)

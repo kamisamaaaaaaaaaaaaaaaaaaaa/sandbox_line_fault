@@ -98,8 +98,14 @@ public final class FaultConfig {
         return out;
     }
 
-    public String sandboxShPath() {
-        return require("sandbox.sh.path");
+    /** 是否挂载故障模块：false = 纯解析模式（只落库不注入故障，应用正常启动） */
+    public boolean mountEnabled() {
+        return getBoolean("mount.enabled", true);
+    }
+
+    /** sandbox 工具安装目录（挂载脚本位于其 bin/sandbox.sh） */
+    public String sandboxHome() {
+        return get("sandbox.home", "/home/lys2/sandbox");
     }
 
     /** premain 全程总预算：解析 + 落库 + 挂载 */

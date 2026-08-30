@@ -48,6 +48,11 @@ public final class FaultAgent {
                         stackOf(e), null, bootJar);
             }
             List<Long> unitIds = ParseOrchestrator.parseAndStore(config, bootJar, deadline);
+            if (!config.mountEnabled()) {
+                FaultLogger.info("mount.enabled=false -> parse-only mode (results in DB), "
+                        + "release application startup without fault injection");
+                return;
+            }
             SandboxMountInvoker.mountSync(config, pid, unitIds, bootJar, deadline);
             FaultLogger.info("premain completed: mount OK, release application startup");
         } catch (HardProtectException e) {

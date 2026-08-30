@@ -43,7 +43,8 @@ java -Dfault.tag=round-001 \
 | `jdbc.username` | 是 | 数据库用户 |
 | `jdbc.password` | 是 | 数据库密码 |
 | `lib.whitelist` | 否 | **lib 白名单**：bootJar 的 `BOOT-INF/lib/` 中需要解析的 jar 文件名，**逗号分隔多个**，支持前缀匹配。例：`lib.whitelist=biz-dao,biz-service,order-common-2.1.jar`。留空 = 只解析 `BOOT-INF/classes/` |
-| `sandbox.sh.path` | 是 | sandbox.sh 绝对路径 |
+| `mount.enabled` | 否（默认 true） | **是否注入故障**：true = 解析后自动挂载模块并注入；**false = 纯解析模式**（只把类/方法清单落库，应用正常启动，不挂载不注入） |
+| `sandbox.home` | 否（默认 `/home/lys2/sandbox`） | sandbox 工具安装目录（挂载脚本自动取其 `bin/sandbox.sh`） |
 | `premain.timeout.ms` | 否（默认 600000） | premain 全程总预算（解析+落库+挂载），大项目按需调大 |
 | `orphan.threshold.minutes` | 否（默认 10） | 异机孤儿解析判定阈值（分钟） |
 
@@ -95,7 +96,7 @@ java -Dfault.tag=round-001 \
 | `HARD PROTECT: phase=PARSE, type=EXCEPTION, msg=bootJar not located` | 未以 `-jar` 方式启动 | 改为 `java -javaagent:... -jar app.jar` 启动 |
 | `HARD PROTECT: phase=DB, msg=schema check failed ... (run schema.sql manually)` | 库表未建/不可达 | 先执行 `schema.sql`；检查 `jdbc.host`/网络/账号 |
 | `HARD PROTECT: phase=DB, ... Communications link failure` | MySQL 连不上 | 检查 MySQL 存活、`jdbc.host`、防火墙 3306 |
-| `HARD PROTECT: phase=MOUNT, type=TIMEOUT, msg=sandbox.sh wait timeout` | 挂载超时 | 检查 sandbox 安装与 `sandbox.sh.path`；适当调大 `premain.timeout.ms` |
+| `HARD PROTECT: phase=MOUNT, type=TIMEOUT, msg=sandbox.sh wait timeout` | 挂载超时 | 检查 sandbox 安装与 `sandbox.home`；适当调大 `premain.timeout.ms` |
 | `HARD PROTECT: phase=MOUNT, ... sandbox.sh exit code=1` | 挂载命令失败 | 看 `mount cmd` 下方的输出内容定位（权限/模块 jar 缺失等） |
 | `jvm property 'fault.tag' missing -> kill process per policy` | **启动时没加 `-Dfault.tag`**，进程被按策略 kill | 启动命令补上 `-Dfault.tag=<轮次>` |
 | `write t_error_record failed, fallback to local log only` | MySQL 不可达，错误只落在本地日志 | 恢复 MySQL 后重启 |
