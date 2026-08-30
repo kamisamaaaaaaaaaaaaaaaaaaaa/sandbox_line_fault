@@ -74,7 +74,8 @@ public final class FaultConfig {
     public String jdbcUrl() {
         return get("jdbc.url",
                 "jdbc:mysql://127.0.0.1:3306/fault_sandbox?useUnicode=true&characterEncoding=utf8"
-                        + "&useSSL=false&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true");
+                        + "&useSSL=false&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true"
+                        + "&connectTimeout=5000&socketTimeout=10000");
     }
 
     public String jdbcUsername() {
