@@ -47,9 +47,9 @@ public final class FaultAgent {
                         null, null, null);
             }
             try {
-                SchemaInitializer.init(config);
+                SchemaInitializer.checkTables(config);
             } catch (RuntimeException e) {
-                throw HardProtectException.exception("DB", "schema init failed: " + e.getMessage(),
+                throw HardProtectException.exception("DB", "schema check failed: " + e.getMessage(),
                         stackOf(e), null, bootJar);
             }
             List<Long> unitIds = ParseOrchestrator.parseAndStore(config, bootJar, deadline);
