@@ -71,11 +71,16 @@ public final class FaultConfig {
         return getBoolean("agent.enabled", true);
     }
 
+    /** 故障库连接：显式 jdbc.url 优先；否则用 jdbc.host（默认 127.0.0.1）拼接 */
     public String jdbcUrl() {
-        return get("jdbc.url",
-                "jdbc:mysql://127.0.0.1:3306/fault_sandbox?useUnicode=true&characterEncoding=utf8"
-                        + "&useSSL=false&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true"
-                        + "&connectTimeout=5000&socketTimeout=10000");
+        String override = get("jdbc.url", "");
+        if (!override.isEmpty()) {
+            return override;
+        }
+        String host = get("jdbc.host", "127.0.0.1");
+        return "jdbc:mysql://" + host + ":3306/fault_sandbox?useUnicode=true&characterEncoding=utf8"
+                + "&useSSL=false&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true"
+                + "&connectTimeout=5000&socketTimeout=10000";
     }
 
     public String jdbcUsername() {
