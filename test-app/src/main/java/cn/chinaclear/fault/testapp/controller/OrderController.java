@@ -45,4 +45,12 @@ public class OrderController {
         result.put("count", count);
         return result;
     }
+
+    @GetMapping("/order/audit")
+    public Map<String, Object> audit() {
+        Map<String, Object> result = new HashMap<>();
+        orderService.auditAll();
+        result.put("audited", true);
+        return result;
+    }
 }

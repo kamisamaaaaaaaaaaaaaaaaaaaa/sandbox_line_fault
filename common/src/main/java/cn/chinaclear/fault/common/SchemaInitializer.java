@@ -27,10 +27,27 @@ public final class SchemaInitializer {
             for (String ddl : DDL) {
                 st.execute(ddl);
             }
+            migrate(st);
         } catch (SQLException e) {
             throw new IllegalStateException("create tables failed: " + e.getMessage(), e);
         }
         FaultLogger.info("schema initialized (database fault_sandbox + 4 tables)");
+    }
+
+    /** 旧库迁移：表3 轮次 tag 列与轮内判重唯一索引（幂等，失败忽略=已是目标结构） */
+    private static void migrate(Statement st) {
+        try {
+            st.execute("ALTER TABLE t_fault_record ADD COLUMN tag VARCHAR(64) NOT NULL DEFAULT '' COMMENT '故障注入轮次'");
+        } catch (SQLException ignore) {
+        }
+        try {
+            st.execute("ALTER TABLE t_fault_record DROP INDEX uk_hit");
+        } catch (SQLException ignore) {
+        }
+        try {
+            st.execute("ALTER TABLE t_fault_record ADD UNIQUE KEY uk_hit_tag (unit_id, class_name, method_name, line_no, tag)");
+        } catch (SQLException ignore) {
+        }
     }
 
     /** jdbc:mysql://host:3306/db?params -> jdbc:mysql://host:3306/?params */
@@ -71,6 +88,7 @@ public final class SchemaInitializer {
             "CREATE TABLE IF NOT EXISTS t_fault_record ("
                     + " id           BIGINT AUTO_INCREMENT PRIMARY KEY,"
                     + " unit_id      BIGINT       NOT NULL COMMENT 't_jar_record.id',"
+                    + " tag          VARCHAR(64)  NOT NULL DEFAULT '' COMMENT '故障注入轮次（JVM -Dfault.tag）',"
                     + " hostname     VARCHAR(128) NOT NULL COMMENT '死亡节点机器名',"
                     + " ip           VARCHAR(64)  NOT NULL,"
                     + " class_name   VARCHAR(256) NOT NULL,"
@@ -79,7 +97,7 @@ public final class SchemaInitializer {
                     + " thread_name  VARCHAR(128) NOT NULL,"
                     + " fault_type   VARCHAR(32)  NOT NULL DEFAULT 'KILL_PROCESS',"
                     + " occurred_at  DATETIME     NOT NULL,"
-                    + " UNIQUE KEY uk_hit (unit_id, class_name, method_name, line_no)"
+                    + " UNIQUE KEY uk_hit_tag (unit_id, class_name, method_name, line_no, tag)"
                     + ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4",
 
             "CREATE TABLE IF NOT EXISTS t_error_record ("

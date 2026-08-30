@@ -3,9 +3,13 @@ package cn.chinaclear.fault.module;
 import cn.chinaclear.fault.common.FaultConfig;
 import cn.chinaclear.fault.common.FaultLogger;
 import cn.chinaclear.fault.common.JdbcHelper;
+import cn.chinaclear.fault.common.KillUtil;
+import cn.chinaclear.fault.common.MachineInfo;
 import cn.chinaclear.fault.common.dao.ClassMethodDao;
+import cn.chinaclear.fault.common.dao.ErrorRecordDao;
 import cn.chinaclear.fault.common.dao.FaultRecordDao;
 import cn.chinaclear.fault.common.model.ClassMethodInfo;
+import cn.chinaclear.fault.common.model.ErrorRecord;
 import com.alibaba.jvm.sandbox.api.Information;
 import com.alibaba.jvm.sandbox.api.Module;
 import com.alibaba.jvm.sandbox.api.annotation.Command;
@@ -20,6 +24,8 @@ import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * 故障注入模块：
@@ -34,13 +40,30 @@ public class FaultKillModule implements Module {
     @Resource
     private ModuleEventWatcher moduleEventWatcher;
 
+    /** 已注入的解析单元（重复 inject 防重，避免重复注册 watch 导致多倍回调） */
+    private final Set<Long> injectedUnits = ConcurrentHashMap.newKeySet();
+
     @Command("inject")
     public void inject(final Map<String, String> param) {
         FaultLogger.init("fault-module.log");
         FaultConfig config = FaultConfig.load(null);
+        final long pid = currentPid();
+
+        // 轮次 tag：JVM 系统属性 -Dfault.tag；缺失则直接 kill，绝不让进程无轮次标识地跑下去
+        final String tag = System.getProperty("fault.tag", "").trim();
+        if (tag.isEmpty()) {
+            FaultLogger.error("jvm property 'fault.tag' missing -> kill process per policy (no injection without a round tag)");
+            recordMissingTag(config, pid, param);
+            KillUtil.killCurrentProcess(pid);
+            return;
+        }
 
         List<Long> unitIds = parseUnitIds(param.get("id"));
-        FaultLogger.info("inject requested, unitIds=" + unitIds);
+        if (injectedUnits.containsAll(unitIds)) {
+            FaultLogger.info("inject skipped: units already injected, unitIds=" + unitIds + ", tag=" + tag);
+            return;
+        }
+        FaultLogger.info("inject requested, unitIds=" + unitIds + ", tag=" + tag);
 
         JdbcHelper db = new JdbcHelper(config.jdbcUrl(), config.jdbcUsername(), config.jdbcPassword());
         List<ClassMethodInfo> methods = new ClassMethodDao(db).findByUnitIds(unitIds);
@@ -60,11 +83,10 @@ public class FaultKillModule implements Module {
             classToUnitId.put(m.getClassName(), m.getUnitId());
         }
         FaultLogger.info("watch target: classes=" + classMethods.size()
-                + " methods=" + methods.size());
+                + " methods=" + methods.size() + ", tag=" + tag);
 
         final FaultRecordDao faultRecordDao = new FaultRecordDao(db);
-        final long pid = currentPid();
-        final KillAdviceListener listener = new KillAdviceListener(faultRecordDao, classToUnitId, pid);
+        final KillAdviceListener listener = new KillAdviceListener(faultRecordDao, classToUnitId, pid, tag);
 
         // 每个类一次链式注册（方法逐个 onBehavior 链上）；watcher 常驻 matcher，对启动后才加载的类同样生效
         int registered = 0;
@@ -86,8 +108,28 @@ public class FaultKillModule implements Module {
                 FaultLogger.error("register watch failed for class=" + entry.getKey(), t);
             }
         }
+        injectedUnits.addAll(unitIds);
         FaultLogger.info("inject done: registered=" + registered + "/" + classMethods.size()
-                + " classes, waiting for first line hit");
+                + " classes, tag=" + tag + ", waiting for first line hit");
+    }
+
+    /** 无 tag 策略：记录表4 后 kill（写表失败仅留本地日志，kill 必达） */
+    private void recordMissingTag(FaultConfig config, long pid, Map<String, String> injectParam) {
+        try {
+            JdbcHelper db = new JdbcHelper(config.jdbcUrl(), config.jdbcUsername(), config.jdbcPassword());
+            ErrorRecord er = new ErrorRecord();
+            er.setPhase("MOUNT");
+            er.setErrorType("EXCEPTION");
+            er.setMessage("jvm property 'fault.tag' missing, process killed per policy");
+            er.setDetail(null);
+            er.setUnitIds(injectParam != null ? injectParam.get("id") : null);
+            er.setBootJar(System.getProperty("sun.java.command"));
+            er.setHostname(MachineInfo.hostname());
+            er.setIp(MachineInfo.ip());
+            new ErrorRecordDao(db).insert(er);
+        } catch (Throwable t) {
+            FaultLogger.error("write t_error_record failed (local log only)", t);
+        }
     }
 
     private static List<Long> parseUnitIds(String ids) {

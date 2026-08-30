@@ -1,5 +1,6 @@
 package cn.chinaclear.fault.testapp;
 
+import cn.chinaclear.fault.testapp.service.OrderService;
 import cn.chinaclear.fault.testlib.AmountChecker;
 import cn.chinaclear.fault.testlib.IdGenerator;
 import org.springframework.boot.CommandLineRunner;
@@ -38,8 +39,9 @@ public class TestApplication {
     }
 
     @Bean
-    public CommandLineRunner startupRunner() {
+    public CommandLineRunner startupRunner(OrderService orderService) {
         return args -> {
+            orderService.auditAll();
             String banner = "fault-test-app starting up";
             System.out.println(banner);
             long start = System.currentTimeMillis();

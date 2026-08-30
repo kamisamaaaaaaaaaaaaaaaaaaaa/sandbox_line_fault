@@ -97,7 +97,11 @@ public final class BootJarParser {
         return out;
     }
 
-    /** ASM 解析单个 class：收集非 synthetic、非 &lt;clinit&gt; 的全部方法 */
+    /**
+     * ASM 解析单个 class：收集全部可注入方法。
+     * 排除 &lt;clinit&gt;；synthetic 方法仅纳入 lambda（lambda$ 前缀，其体内为用户逻辑），
+     * 其余 synthetic（bridge/access$ 转发）排除以避免重复命中。
+     */
     private static void parseClass(InputStream in, final List<ClassMethodInfo> out) {
         try {
             final ClassReader reader = new ClassReader(in);
@@ -107,9 +111,14 @@ public final class BootJarParser {
                 public MethodVisitor visitMethod(int access, String name, String desc,
                                                  String signature, String[] exceptions) {
                     boolean synthetic = (access & Opcodes.ACC_SYNTHETIC) != 0;
-                    if (!synthetic && !"<clinit>".equals(name)) {
-                        out.add(new ClassMethodInfo(0L, className, name, desc));
+                    boolean isLambda = synthetic && name.startsWith("lambda$");
+                    if ("<clinit>".equals(name)) {
+                        return null;
                     }
+                    if (synthetic && !isLambda) {
+                        return null;
+                    }
+                    out.add(new ClassMethodInfo(0L, className, name, desc));
                     return null;
                 }
             }, ClassReader.SKIP_CODE);

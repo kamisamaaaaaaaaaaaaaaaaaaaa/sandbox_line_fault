@@ -8,6 +8,8 @@ import java.util.Date;
 @Data
 public class FaultRecord {
     private long unitId;
+    /** 故障注入轮次（JVM -Dfault.tag） */
+    private String tag;
     private String hostname;
     private String ip;
     private String className;
