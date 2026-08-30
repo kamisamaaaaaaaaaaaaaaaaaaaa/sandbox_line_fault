@@ -1,0 +1,62 @@
+﻿> Task :common:compileJava UP-TO-DATE
+> Task :common:processResources NO-SOURCE
+> Task :common:classes UP-TO-DATE
+> Task :common:jar UP-TO-DATE
+
+> Task :fault-module:compileJava FAILED
+.\gradlew.bat : 警告: [options] 源值 8 已过时，将在未来发行版中删除
+所在位置 C:\Users\86132\AppData\Local\Temp\genie-ps-1788070983435-7omkxy.ps1:558 字符: 47
++ ... p\SANDBO~2; .\gradlew.bat :fault-module:compileJava --console=plain 2 ...
++                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (警告: [options] 源值 8 已过时，将在未来发行版中删除:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+警告: [options] 目标值 8 已过时，将在未来发行版中删除
+警告: [options] 要隐藏有关已过时选项的警告, 请使用 -Xlint:-options。
+注: Writing META-INF/services/com.alibaba.jvm.sandbox.api.Module
+C:\Users\86132\Desktop\sandbox行故障\fault-module\src\main\java\cn\chinaclear\fault\module\FaultKillModule.java:75: 错误: 不兼
+容的类型: 不存在类型变量T的实例, 以使T[]与String一致
+                        .onBehavior(entry.getValue().toArray(new String[0]))
+                        ^
+  其中, T是类型变量:
+    T扩展已在方法 <T>toArray(T[])中声明的Object
+C:\Users\86132\Desktop\sandbox行故障\fault-module\src\main\java\cn\chinaclear\fault\module\KillAdviceListener.java:59: 错误:
+ 无法将类 FaultLogger中的方法 error应用到给定类型;
+                FaultLogger.error("FAULT HIT & PREEMPTED: unitId=" + unitId
+                           ^
+  需要: String,Throwable
+  找到:    String
+  原因: 实际参数列表和形式参数列表长度不同
+注: 某些消息已经过简化; 请使用 -Xdiags:verbose 重新编译以获得完整输出
+2 个错误
+3 个警告
+
+[Incubating] Problems report is available at: file:///C:/Users/86132/Desktop/sandbox%E8%A1%8C%E6%95%85%E9%9A%9C/build/reports/problems/problems-report.html
+
+FAILURE: Build failed with an exception.
+
+* What went wrong:
+Execution failed for task ':fault-module:compileJava'.
+> Compilation failed; see the compiler output below.
+  警告: [options] 要隐藏有关已过时选项的警告, 请使用 -Xlint:-options。注: 某些消息已经过简化; 请使用 -Xdiags:verbose 重新编译以获得完整输出注: Writing META-INF/ser
+vices/com.alibaba.jvm.sandbox.api.ModuleC:\Users\86132\Desktop\sandbox行故障\fault-module\src\main\java\cn\chinaclear\faul
+t\module\KillAdviceListener.java:59: 错误: 无法将类 FaultLogger中的方法 error应用到给定类型;
+                  FaultLogger.error("FAULT HIT & PREEMPTED: unitId=" + unitId
+                             ^
+    需要: String,Throwable
+    找到:    String
+    原因: 实际参数列表和形式参数列表长度不同警告: [options] 源值 8 已过时，将在未来发行版中删除C:\Users\86132\Desktop\sandbox行故障\fault-module\src\main\java\
+cn\chinaclear\fault\module\FaultKillModule.java:75: 错误: 不兼容的类型: 不存在类型变量T的实例, 以使T[]与String一致
+                          .onBehavior(entry.getValue().toArray(new String[0]))
+                          ^
+    其中, T是类型变量:
+      T扩展已在方法 <T>toArray(T[])中声明的Object警告: [options] 目标值 8 已过时，将在未来发行版中删除
+  2 个错误
+  3 个警告
+
+* Try:
+> Check your code and dependencies to fix the compilation error(s)
+> Run with --scan to get full insights.
+
+BUILD FAILED in 1s
+3 actionable tasks: 1 executed, 2 up-to-date

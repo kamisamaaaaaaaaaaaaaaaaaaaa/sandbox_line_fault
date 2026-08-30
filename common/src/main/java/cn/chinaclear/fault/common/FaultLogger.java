@@ -44,6 +44,10 @@ public final class FaultLogger {
         log("WARN", msg, null);
     }
 
+    public static void error(String msg) {
+        log("ERROR", msg, null);
+    }
+
     public static void error(String msg, Throwable t) {
         log("ERROR", msg, t);
     }
