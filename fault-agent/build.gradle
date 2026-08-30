@@ -1,0 +1,29 @@
+// premain agent：fat jar；依赖会被加入目标应用 system classpath，
+// 因此 mysql/asm/protobuf 全部 relocate 隔离，避免与应用依赖冲突
+apply plugin: 'com.gradleup.shadow'
+
+dependencies {
+    implementation project(':common')
+}
+
+tasks.withType(JavaCompile).configureEach {
+    options.release = 8
+}
+
+jar.enabled = false
+
+shadowJar {
+    archiveClassifier = ''
+    manifest {
+        attributes(
+                'Premain-Class': 'cn.chinaclear.fault.agent.FaultAgent',
+                'Can-Retransform-Classes': 'false'
+        )
+    }
+    relocate 'com.mysql', 'cn.chinaclear.fault.shaded.mysql'
+    relocate 'com.google.protobuf', 'cn.chinaclear.fault.shaded.protobuf'
+    relocate 'org.objectweb.asm', 'cn.chinaclear.fault.shaded.asm'
+    relocate 'com.google.common', 'cn.chinaclear.fault.shaded.guava'
+}
+
+build.dependsOn shadowJar

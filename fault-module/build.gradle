@@ -1,0 +1,23 @@
+// sandbox 模块：fat jar；sandbox-api/common-api 由 sandbox 宿主提供（compileOnly，不打入）；
+// 模块运行在 sandbox 独立 module classloader 中，mysql 无需 relocate
+apply plugin: 'com.gradleup.shadow'
+
+dependencies {
+    implementation project(':common')
+    compileOnly 'com.alibaba.jvm.sandbox:sandbox-api:1.4.0'
+    compileOnly 'com.alibaba.jvm.sandbox:sandbox-common-api:1.4.0'
+    compileOnly 'org.kohsuke.metainf-services:metainf-services:1.7'
+    annotationProcessor 'org.kohsuke.metainf-services:metainf-services:1.7'
+}
+
+tasks.withType(JavaCompile).configureEach {
+    options.release = 8
+}
+
+jar.enabled = false
+
+shadowJar {
+    archiveClassifier = ''
+}
+
+build.dependsOn shadowJar

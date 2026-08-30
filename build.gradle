@@ -1,0 +1,24 @@
+buildscript {
+    repositories {
+        mavenCentral()
+    }
+    dependencies {
+        classpath 'com.gradleup.shadow:com.gradleup.shadow.gradle.plugin:9.4.3'
+    }
+}
+
+allprojects {
+    apply plugin: 'java'
+    group = 'cn.chinaclear.fault'
+    version = '1.0.0'
+
+    repositories {
+        mavenCentral()
+    }
+}
+
+subprojects {
+    tasks.withType(JavaCompile).configureEach {
+        options.encoding = 'UTF-8'
+    }
+}

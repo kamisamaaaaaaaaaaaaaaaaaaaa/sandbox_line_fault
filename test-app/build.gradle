@@ -1,0 +1,2 @@
+// Spring Boot 验证应用：依赖与打包方式在探测 Linux 目标机 JDK 版本后确定
+// （Boot 3.x + release 17，或 Boot 2.7 + release 8 手工 bootJar 组装）
