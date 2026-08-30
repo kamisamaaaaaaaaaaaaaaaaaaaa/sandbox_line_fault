@@ -1,0 +1,4 @@
+// 白名单验证用业务 lib：打进 test-app 的 BOOT-INF/lib，agent 白名单命中后作为 LIB_JAR 单元解析
+tasks.withType(JavaCompile).configureEach {
+    options.release = 8
+}
