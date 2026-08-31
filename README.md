@@ -32,12 +32,12 @@ java -Dfault.tag=round-001 \
 
 ## 三、配置说明
 
-配置随 fat jar 内置（`config.properties`），修改后需重新打包。agent 侧还支持启动参数覆盖：
+配置随 fat jar 内置（`config.yml`），修改后需重新打包。agent 侧还支持启动参数覆盖：
 `-javaagent:fault-agent.jar=键=值,键2=值2`（仅 agent，多个用逗号分隔）。
 
 ### fault-agent 的 config.yml
 
-**必填项只有 `jdbc.username` 和 `jdbc.password`**（代码内强校验，缺失则进程被按策略 kill）；其余均有代码默认值，按需修改。
+**必填项是 `jdbc.url`、`jdbc.username`、`jdbc.password`**（代码内强校验，缺失则进程被按策略 kill）；其余均有代码默认值，按需修改。
 
 | 键 | 必填 | 说明 |
 |---|---|---|
@@ -78,7 +78,7 @@ java -Dfault.tag=round-001 \
 
 | 日志 | 含义 |
 |---|---|
-| `premain start: pid=... budget=...` | agent 开始工作 |
+| `premain start: pid=... parseTimeout=... mountTimeout=...` | agent 开始工作（两阶段超时各自独立计时） |
 | `bootJar located: /path/app.jar` | 成功定位 bootJar |
 | `schema check OK: all 4 tables exist` | 建表校验通过 |
 | `unit stored: type=CLASSES source=... unitId=N classes=A methods=B` | 该解析单元首次/重新解析完成入库 |
@@ -101,14 +101,16 @@ java -Dfault.tag=round-001 \
 | 日志 | 含义 | 处理 |
 |---|---|---|
 | `HARD PROTECT: phase=PARSE, type=EXCEPTION, msg=bootJar not located` | 未以 `-jar` 方式启动 | 改为 `java -javaagent:... -jar app.jar` 启动 |
-| `HARD PROTECT: phase=DB, msg=schema check failed ... (run schema.sql manually)` | 库表未建/不可达 | 先执行 `schema.sql`；检查 `jdbc.host`/网络/账号 |
-| `HARD PROTECT: phase=DB, ... Communications link failure` | MySQL 连不上 | 检查 MySQL 存活、`jdbc.host`、防火墙 3306 |
-| `HARD PROTECT: phase=MOUNT, type=TIMEOUT, msg=sandbox.sh wait timeout` | 挂载超时 | 检查 sandbox 安装与 `sandbox.home`；适当调大 `premain.timeout.ms` |
+| `HARD PROTECT: phase=DB, msg=schema check failed ... (run schema.sql manually)` | 库表未建/不可达 | 先执行 `schema.sql`；检查 `jdbc.url`/网络/账号 |
+| `HARD PROTECT: phase=DB, ... Communications link failure` | MySQL 连不上 | 检查 MySQL 存活、`jdbc.url`、防火墙 3306 |
+| `HARD PROTECT: phase=MOUNT, type=TIMEOUT, msg=sandbox.sh wait timeout` | 挂载超时 | 检查 sandbox 安装与 `sandbox.home`；适当调大 `mount.timeout.ms` |
 | `HARD PROTECT: phase=MOUNT, ... sandbox.sh exit code=1` | 挂载命令失败 | 看 `mount cmd` 下方的输出内容定位（权限/模块 jar 缺失等） |
 | `jvm property 'fault.tag' missing -> kill process per policy` | **启动时没加 `-Dfault.tag`**，进程被按策略 kill | 启动命令补上 `-Dfault.tag=<轮次>` |
 | `write t_error_record failed, fallback to local log only` | MySQL 不可达，错误只落在本地日志 | 恢复 MySQL 后重启 |
-| `unit pending on other node (in progress), skip` | 其他节点正在解析，本节点跳过 | 无需处理 |
+| `waiting for other node to finish parsing` → `other node completed, proceed` | 异机 pending 未超时：本节点轮询等待对方解析完成 | 无需处理 |
 | `re-parse claimed (pending left by THIS machine)` | 上次解析被中断（如进程被杀），本次续传 | 无需处理 |
+| `re-parse claimed by other node first, waiting for its result` | failed 单元重解析权被他节点抢走，本节点等待其结果 | 无需处理 |
+| `HARD PROTECT: ... invalid config.yml` / `required config missing` | 配置文件非法 / 必填项缺失（痕迹在 stdout/app.log，因配置不可用写不了 `logs/`） | 修正 `config.yml` 后重启 |
 
 ## 六、常见问题（FAQ）
 

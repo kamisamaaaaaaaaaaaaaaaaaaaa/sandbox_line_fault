@@ -1,18 +1,19 @@
 # fault-sandbox 测试用例总入口
 
-> 运行环境：Linux 192.168.193.131（lys2）。产物：`fault-agent-1.0.0.jar`、`fault-module-1.0.0.jar`、`test-app.jar`。
+> 运行环境：Linux 192.168.193.129（lys）。产物：`fault-agent-1.0.0.jar`、`fault-module-1.0.0.jar`、`test-app.jar`。
 > 预期分三类：**命令预期 / 后端日志预期 / 数据库状态预期**。每条用例执行后在此记录结果与时间。
 
 ## 前置条件
 
-- [ ] fault_sandbox 库与 4 张表可被 agent 自动初始化（或已手工建好）
-- [ ] `sandbox-modules/` 已有 fault-module-1.0.0.jar
-- [ ] agent config.properties 的 jdbc.url 指向 Linux 侧可达 MySQL，sandbox.sh.path 正确
-- [ ] test-app.jar 白名单已启用：`-javaagent:fault-agent.jar=lib.whitelist=fault-test-lib`
+- [ ] fault_sandbox 库与 4 张表**已手工执行 schema.sql 建好**（agent 只做存在性校验，缺表即硬保护，绝不自动建表）
+- [ ] `sandbox/sandbox-module/` 已有 fault-module-1.0.0.jar
+- [ ] agent `config.yml` 的 `jdbc.url` 指向可达 MySQL，`sandbox.home` 指向 sandbox 安装目录
+- [ ] test-app.jar 白名单已配置：`config.yml` 中 `lib.whitelist: test-lib.*`（或用 `-javaagent:fault-agent.jar=lib.whitelist=test-lib.*` 覆盖）
+- [ ] **所有用例启动命令必须带 `-Dfault.tag=<用例标识>`**（缺 tag 会被模块按策略 kill，无法执行用例）
 
 ## TC1 首次启动解析落库
 
-- 操作：`java -javaagent:fault-agent.jar=lib.whitelist=fault-test-lib -jar test-app.jar`
+- 操作：`java -Dfault.tag=tc1 -javaagent:fault-agent.jar -jar test-app.jar`
 - 命令预期：应用启动成功（premain 解析落库 → 自动挂载 → 放行）
 - 日志预期：agent 日志出现 `bootJar located` / `unit stored ... classes=N methods=M` / `mount OK, release application startup`；无 HARD PROTECT
 - 数据库预期：
@@ -61,18 +62,18 @@
 
 ## TC7 挂载失败硬保护
 
-- 操作：`-javaagent:fault-agent.jar=sandbox.sh.path=/not/exist/sandbox.sh`
+- 操作：`-javaagent:fault-agent.jar=sandbox.home=/not/exist`
 - 命令预期：进程自动退出（被 agent kill），应用不会启动完成
 - 日志预期：agent 日志出现 `HARD PROTECT: phase=MOUNT`；`KILL current process`
 - 数据库预期：t_error_record 新增一条 phase=MOUNT、error_type=TIMEOUT 或 EXCEPTION、boot_jar 为完整路径；对应 t_jar_record 行 status=completed（解析成功不受挂载失败影响）
 - 结果：☐ 通过 ☐ 失败
 
-## TC8 agent.enabled=false 放行
+## TC8 mount.enabled=false 纯解析模式放行
 
-- 操作：`-javaagent:fault-agent.jar=agent.enabled=false -jar test-app.jar`
-- 命令预期：应用正常启动，无解析无挂载
-- 日志预期：agent 日志仅 `agent.enabled=false -> skip all`
-- 数据库预期：无新增
+- 操作：`-javaagent:fault-agent.jar=mount.enabled=false -jar test-app.jar`
+- 命令预期：应用正常启动（解析落库后放行，不挂载不注入）
+- 日志预期：agent 日志出现 `unit stored ...`，随后 `mount.enabled=false -> parse-only mode (results in DB), release application startup`
+- 数据库预期：t_jar_record/t_class_method 正常落库（status=completed）；t_fault_record 无新增（进程存活不命中）
 - 结果：☐ 通过 ☐ 失败
 
 ## 执行记录
@@ -97,7 +98,7 @@
 | V3 | lambda 行级命中 | ✅ | 解析纳入 `lambda$` 前缀方法；tagB 轮渐进重启命中 `lambda$startupRunner$0` line44、`lambda$auditAll$0` line77/78/79 并依次 kill |
 | V4 | tag 轮内判重 | ✅ | tagB 轮 24 条记录覆盖 24 个不同 (class,method,line)，同轮同行不重复注入；tagB 与 tagA、空 tag 互不影响 |
 
-> 环境备注：Linux OpenJDK 21 下 `getInputArguments()` 不含 `-jar`（JDK9+ 行为），bootJar 定位链已改为 sun.java.command → /proc/self/cmdline → inputArguments → 配置兜底；sandbox.sh 需以其 bin 目录为工作目录执行（SANDBOX_HOME_DIR=${PWD}/..）。
+> 环境备注：Linux OpenJDK 21 下 `getInputArguments()` 不含 `-jar`（JDK9+ 行为），bootJar 定位链为 sun.java.command → /proc/self/cmdline → inputArguments 三级（均失败则硬保护 kill，无配置兜底）；sandbox.sh 需以其 bin 目录为工作目录执行（SANDBOX_HOME_DIR=${PWD}/..）。
 >
 > 轮次说明：操作者在目标应用 JVM 参数加 `-Dfault.tag=<轮次标识>`；模块 inject 时读取，缺失则直接 kill 进程（表4 留痕）。判重唯一索引 `uk(unit_id,class,method,line,tag)`——新 tag 开始所有行重新可注入。
 

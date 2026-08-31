@@ -75,9 +75,9 @@
 |---|---|---|
 | 无记录 | 首次解析 | 插入 pending 后解析 |
 | completed | 已解析 | 跳过 |
-| failed | 上次解析异常 | 条件 UPDATE 置回 pending + 刷新本节点 hostname/ip → 解析 |
+| failed | 上次解析异常 | 条件 UPDATE 置回 pending + 刷新本节点 hostname/ip → 解析；**抢占失败（他节点刚接手）→ 轮询等待其结果** |
 | pending 且 ip=自己 且 boot_jar 相同 | 本机上次解析中断（进程被 kill） | 立即重解析，不等超时 |
-| pending 且 ip≠自己、未超时 | 其他节点解析中 | 等待跳过 |
+| pending 且 ip≠自己、未超时 | 其他节点解析中 | 每秒轮询等待：对方 completed → 放行挂载；对方 failed/变孤儿 → 抢占接手 |
 | pending 且 ip≠自己、超时 | 异机孤儿 | 抢占重解析 |
 
 同机多实例同时抢到同一 pending 也无害：表2 幂等收敛。
@@ -88,7 +88,7 @@
 
 **premain 阶段能被 attach 吗**：可以。sandbox.sh 从外部进程 attach 本 JVM，Attach Listener 是独立线程；主线程阻塞在 native 等待（waitFor）不挡 safepoint，retransform 的 VM_Operation 可正常完成——已在 Linux OpenJDK 21 实测打通。
 
-**失败语义（硬保护）**：`premain.timeout.ms`（默认 10 分钟）是解析+落库+挂载全程总预算，任一阶段超时或异常 → 表1 置 failed（仅解析中单元；挂载阶段失败不动已完成的解析结果）→ 写表4（DB 不可用则降级本地日志）→ `kill` 当前进程。DB 挂起时 connectTimeout/socketTimeout（5s/10s）保证 kill 必达。
+**失败语义（硬保护）**：超时拆成两阶段独立计时——`parse.timeout.ms`（默认 15 分钟：定位后的解析+落库，含等待异机 pending）与 `mount.timeout.ms`（默认 20 分钟：attach + 模块 inject + watch 注册）。任一阶段超时或异常 → 表1 置 failed（仅解析中单元；挂载阶段失败不动已完成的解析结果）→ 写表4（DB 不可用则降级本地日志）→ `kill` 当前进程。DB 挂起时 connectTimeout/socketTimeout（5s/10s）保证 kill 必达。配置文件缺失/非法同样硬保护（此时无库可写，仅本地日志留痕）。
 
 ### D5 kill 前的判重：轮次 tag + 数据库唯一索引
 
@@ -116,14 +116,15 @@ sandbox 1.4.0 的 `EventWatchBuilder` 没有 `withLoad()`（更高版本 API）�
 原则：**故障注入工具自身故障不得拖垮目标应用以外的东西，也不能放行未保护的应用**。具体：
 
 - premain 解析/落库/挂载任何异常 → 表4 + kill（应用不放行）；
+- **模块侧同样硬保护**：单类 watch 注册失败（覆盖不完整）→ 表4 + kill；运行期 `beforeLine` 任何异常（含 DB 不可用）→ 表4 + kill，kill 未生效则 `halt(137)`；
 - DB 不可达时写表4 也会失败 → 降级为本地日志 → 仍然 kill；
 - JDBC 带 connectTimeout=5000/socketTimeout=10000，保证 DB 挂起时 kill 不被无限拖延；
-- kill 三级兜底：`kill -9` → `taskkill /F`（Windows 自测）→ `Runtime.halt(137)`，每级都有日志；
+- kill 两级兜底：`kill -9` → `Runtime.halt(137)`，每级都有日志；
 - 唯一放行例外不存在于运行时——不放 agent jar 应用本来就不受影响（演练结束后摘掉参数重启即可）。
 
 ### D10 日志体系
 
-不依赖 slf4j（避免实现类冲突），自写 `FaultLogger`：同步写文件（`logs/fault-agent.log` / `logs/fault-module.log`）+ stderr，时间戳+线程名+级别，异常带堆栈。关键分支全覆盖：premain 各阶段、状态机每个分支的原因（failed 重解析/本机中断/孤儿抢占/被他节点抢先）、mount 命令与输出、命中与抢占、DuplicateKey 放行（每行仅首次）、kill 命令执行结果与兜底分支。
+不依赖 slf4j（避免实现类冲突），自写 `FaultLogger`：同步写文件（`logs/fault-agent.log` / `logs/fault-module.log`）+ stdout，时间戳+线程名+级别，异常带堆栈；日志目录不可写时降级为仅 stdout。关键分支全覆盖：premain 各阶段、状态机每个分支的原因（failed 重解析/本机中断/孤儿抢占/被他节点抢先）、mount 命令与输出、命中与抢占、DuplicateKey 放行（每行仅首次）、kill 命令执行结果与兜底分支。
 
 ## 4. 数据模型
 
