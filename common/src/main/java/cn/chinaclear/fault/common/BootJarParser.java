@@ -6,11 +6,9 @@ import org.objectweb.asm.ClassVisitor;
 import org.objectweb.asm.MethodVisitor;
 import org.objectweb.asm.Opcodes;
 
-import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.file.Path;
-import java.util.ArrayList;
 import java.util.Enumeration;
 import java.util.List;
 import java.util.regex.Pattern;
@@ -19,10 +17,14 @@ import java.util.zip.ZipFile;
 import java.util.zip.ZipInputStream;
 
 /**
- * bootJar 解析器：
+ * bootJar 解析器（流式，不把全量方法驻留内存）：
  * 1) BOOT-INF/classes/ 整体一个解析单元（hash = 条目聚合）；
  * 2) BOOT-INF/lib/ 中命中白名单的每个 jar 各一个单元（hash = 字节流）；
- * 每个单元输出类-方法明细（方法名 + 描述符），排除 &lt;clinit&gt; 与 synthetic。
+ *
+ * 每解析到一个单元先回调 {@link UnitHandler#beginUnit}：
+ * 返回 sink 则开始流式解析该类内容（方法逐条 push，由调用方按批写库）；
+ * 返回 null 则跳过该单元的内容解析（用于"已解析过"的快速跳过，省去 ASM 开销）。
+ * 每个单元输出类-方法明细（方法名 + 描述符），排除 &lt;clinit&gt; 与 synthetic（lambda 除外）。
  */
 public final class BootJarParser {
 
@@ -35,39 +37,37 @@ public final class BootJarParser {
     private BootJarParser() {
     }
 
-    /** 单元解析结果 */
-    public static final class ParseUnit {
-        public final String unitType;
-        public final String sourceJar;
-        public final String sha256;
-        public final List<ClassMethodInfo> methods;
-        /** 解析失败的 class 条目描述（entry - 原因），由调用方记录表4 */
-        public final List<String> failedClasses;
+    /** 单元方法接收器：由调用方实现分批写库，避免全量方法驻留内存 */
+    public interface UnitSink {
+        /** 解析出一条方法 */
+        void accept(ClassMethodInfo method);
 
-        ParseUnit(String unitType, String sourceJar, String sha256, List<ClassMethodInfo> methods) {
-            this.unitType = unitType;
-            this.sourceJar = sourceJar;
-            this.sha256 = sha256;
-            this.methods = methods;
-            this.failedClasses = new ArrayList<>();
-        }
+        /** 单个 class 解析失败（该类已跳过，仅留痕，不中断整体流程） */
+        void acceptFailure(String entryName, String reason);
+
+        /** 该单元内容解析结束：flush 剩余批次并收尾 */
+        void finish();
     }
 
-    /** 解析 bootJar：返回 classes 单元 + 全部白名单命中的 lib 单元 */
-    public static List<ParseUnit> parse(Path bootJar, List<String> whitelist) {
-        List<ParseUnit> out = new ArrayList<>();
+    /** 单元回调：返回 sink 表示该单元需要解析；返回 null 表示跳过该单元内容 */
+    public interface UnitHandler {
+        UnitSink beginUnit(String unitType, String sourceJar, String sha256);
+    }
+
+    /** 解析 bootJar：classes 单元 + 全部白名单命中的 lib 单元（流式回调） */
+    public static void parse(Path bootJar, List<String> whitelist, UnitHandler handler) {
         try (ZipFile zip = new ZipFile(bootJar.toFile())) {
             // 1) BOOT-INF/classes 整体一个单元
-            List<String> classEntries = JarHashUtil.listClassesEntries(zip);
-            List<ClassMethodInfo> classMethods = new ArrayList<>();
-            ParseUnit classesUnit = new ParseUnit(UNIT_CLASSES, bootJar.getFileName().toString(),
-                    JarHashUtil.sha256OfClassesDir(bootJar), classMethods);
-            for (String name : classEntries) {
-                try (InputStream in = zip.getInputStream(zip.getEntry(name))) {
-                    parseClass(in, classMethods, name, classesUnit.failedClasses);
+            String classesHash = JarHashUtil.sha256OfClassesDir(bootJar);
+            UnitSink classesSink = handler.beginUnit(UNIT_CLASSES, bootJar.getFileName().toString(), classesHash);
+            if (classesSink != null) {
+                for (String name : JarHashUtil.listClassesEntries(zip)) {
+                    try (InputStream in = zip.getInputStream(zip.getEntry(name))) {
+                        parseClass(in, name, classesSink);
+                    }
                 }
+                classesSink.finish();
             }
-            out.add(classesUnit);
 
             // 2) BOOT-INF/lib 白名单单元
             for (Enumeration<? extends ZipEntry> en = zip.entries(); en.hasMoreElements(); ) {
@@ -80,37 +80,37 @@ public final class BootJarParser {
                 if (!matchesWhitelist(jarName, whitelist)) {
                     continue;
                 }
-                byte[] jarBytes;
+                // 先用流算 hash（不把整个 lib jar 读入内存）
+                String jarHash;
                 try (InputStream in = zip.getInputStream(entry)) {
-                    jarBytes = JarHashUtil.readAll(in);
+                    jarHash = JarHashUtil.sha256OfStream(in);
                 }
-                List<ClassMethodInfo> libMethods = new ArrayList<>();
-                ParseUnit libUnit = new ParseUnit(UNIT_LIB_JAR, jarName,
-                        JarHashUtil.sha256OfStream(new ByteArrayInputStream(jarBytes)), libMethods);
-                try (ZipInputStream zin = new ZipInputStream(new ByteArrayInputStream(jarBytes))) {
+                UnitSink libSink = handler.beginUnit(UNIT_LIB_JAR, jarName, jarHash);
+                if (libSink == null) {
+                    continue;
+                }
+                try (InputStream in = zip.getInputStream(entry);
+                     ZipInputStream zin = new ZipInputStream(in)) {
                     ZipEntry classEntry;
                     while ((classEntry = zin.getNextEntry()) != null) {
                         if (!classEntry.isDirectory() && classEntry.getName().endsWith(".class")) {
-                            parseClass(zin, libMethods, jarName + "!" + classEntry.getName(), libUnit.failedClasses);
+                            parseClass(zin, jarName + "!" + classEntry.getName(), libSink);
                         }
                     }
                 }
-                out.add(libUnit);
+                libSink.finish();
             }
         } catch (IOException e) {
             throw new IllegalStateException("parse bootJar failed: " + bootJar + " - " + e.getMessage(), e);
         }
-        return out;
     }
 
     /**
-     * ASM 解析单个 class：收集全部可注入方法。
+     * ASM 解析单个 class：收集全部可注入方法，逐条 push 给 sink。
      * 排除 &lt;clinit&gt;；synthetic 方法仅纳入 lambda（lambda$ 前缀，其体内为用户逻辑），
      * 其余 synthetic（bridge/access$ 转发）排除以避免重复命中。
      */
-    /** @param failedClasses 解析失败时写入 "entry - 原因"，供上层记录表4 */
-    private static void parseClass(InputStream in, final List<ClassMethodInfo> out,
-                                   final String entryName, final List<String> failedClasses) {
+    private static void parseClass(InputStream in, final String entryName, final UnitSink sink) {
         try {
             final ClassReader reader = new ClassReader(in);
             final String className = reader.getClassName().replace('/', '.');
@@ -126,14 +126,14 @@ public final class BootJarParser {
                     if (synthetic && !isLambda) {
                         return null;
                     }
-                    out.add(new ClassMethodInfo(0L, 0L, className, name, desc));
+                    sink.accept(new ClassMethodInfo(0L, 0L, className, name, desc));
                     return null;
                 }
             }, ClassReader.SKIP_CODE);
         } catch (Exception e) {
             // 单个 class 解析失败只跳过该类，但必须留下痕迹（表4）
             FaultLogger.warn("parse class bytes failed, skipped: " + entryName + " - " + e.getMessage());
-            failedClasses.add(entryName + " - " + e.getMessage());
+            sink.acceptFailure(entryName, e.getMessage());
         }
     }
 

@@ -60,6 +60,8 @@
 
 - **粒度**：`BOOT-INF/classes/` 整体一个单元，hash = 目录下全部 .class 条目按路径排序后内容聚合 SHA-256；白名单命中的每个 lib jar 各一个单元，hash = 字节流 SHA-256。任何类改动重打包后对应单元 hash 变化，自动触发重新解析。
 - **行号不入库**：sandbox 的 `beforeLine(advice, lineNum)` 回调自带行号，静态解析只需方法名+描述符；表2 的 `INSERT IGNORE`（业务唯一索引）天然幂等。
+- **流式解析 + 分批写库（内存控制）**：解析不产生全量方法清单驻留内存——`BootJarParser` 以 `UnitSink` 回调逐条 push 方法，`UnitWriter` 累积到 `parse.batch.size`（默认 2000）即写库一次，单元结束 flush 剩余。内存占用为 O(一批方法 + 类名集合)，大项目（数十万方法）不会打爆内存。
+- **已完成单元跳过内容解析**：`beginUnit` 返回 null 时 parser 直接跳过该单元的 ASM 解析（仍计算 hash 用于判定），二次启动不再白跑一遍全量解析。
 - **synthetic 边界**：synthetic 方法仅纳入 `lambda$` 前缀（lambda 体内是用户逻辑，实测命中 `lambda$auditAll$0` 内部行）；bridge/access$ 等转发型 synthetic 排除（方法体 1-2 行转发且行号指向原声明处，hook 会与目标方法重复命中）；`<clinit>` 排除（见 D10）。
 
 ### D3 并发解析：两态 + 幂等收敛（无抢占、无等待）

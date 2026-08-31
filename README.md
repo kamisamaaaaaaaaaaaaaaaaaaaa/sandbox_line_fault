@@ -49,6 +49,7 @@ java -Dfault.tag=round-001 \
 | `sandbox.home` | **是**（`mount.enabled=true` 时） | sandbox 工具安装目录（挂载脚本自动取其 `bin/sandbox.sh`）。缺失在解析开始前即硬保护，不会白跑解析 |
 | `parse.timeout.ms` | 否（默认 `900000`，15 分钟） | **解析阶段总预算**：从 premain 进入时起算，覆盖本节点全部单元的登记/解析/落库（无等待、无接管，各节点各算各的）；超时即硬保护 |
 | `mount.timeout.ms` | 否（默认 `1200000`，20 分钟） | **挂载阶段超时**：从解析完成、开始挂载时起算，与解析阶段**各自独立计时** |
+| `parse.batch.size` | 否（默认 `2000`） | **解析结果分批写库的批大小**：流式解析（方法不驻留内存），每累积 N 条写库一次。大项目内存敏感可下调（如 500） |
 | `log.dir` | 否（默认 `logs`） | agent 日志目录（相对路径基于目标进程工作目录，建议设绝对路径如 `/var/log/fault`） |
 
 ### fault-module 的 config.yml

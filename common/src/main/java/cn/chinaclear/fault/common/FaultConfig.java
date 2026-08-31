@@ -172,6 +172,11 @@ public final class FaultConfig {
         return getLong("mount.timeout.ms", 1200000L);
     }
 
+    /** 解析结果分批写库的批大小（流式解析，不驻留全量方法清单），默认 2000 */
+    public int parseBatchSize() {
+        return getInt("parse.batch.size", 2000);
+    }
+
     /**
      * 注入排除：方法正则，对 "完全限定类名.方法名" 全串匹配，YAML 列表一行一个（兼容逗号分隔），命中的方法不注入。
      * 排除某个类的所有方法写 "全限定类名\..*"，例如 cn\.demo\.OrderService\..*
