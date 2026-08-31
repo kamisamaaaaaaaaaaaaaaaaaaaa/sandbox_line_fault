@@ -9,7 +9,6 @@ import cn.chinaclear.fault.common.dao.ClassMethodDao;
 import cn.chinaclear.fault.common.dao.ErrorRecordDao;
 import cn.chinaclear.fault.common.dao.JarRecordDao;
 import cn.chinaclear.fault.common.model.ClassMethodInfo;
-import cn.chinaclear.fault.common.model.ErrorRecord;
 import cn.chinaclear.fault.common.model.JarRecord;
 
 import java.util.ArrayList;
@@ -141,25 +140,6 @@ final class ParseOrchestrator {
             methodCount++;
             if (buffer.size() >= batchSize) {
                 flush();
-            }
-        }
-
-        @Override
-        public void acceptFailure(String entryName, String reason) {
-            // 单个 class 解析失败：逐条落表4（低频；写失败仅告警，不影响主流程）
-            try {
-                JdbcHelper db = new JdbcHelper(config.jdbcUrl(), config.jdbcUsername(), config.jdbcPassword());
-                ErrorRecord er = new ErrorRecord();
-                er.setPhase("PARSE");
-                er.setErrorType("EXCEPTION");
-                er.setMessage("class parse failed: " + entryName + " - " + reason);
-                er.setUnitIds(String.valueOf(unitId));
-                er.setBootJar(bootJarPath);
-                er.setHostname(MachineInfo.hostname());
-                er.setIp(MachineInfo.ip());
-                new ErrorRecordDao(db).insert(er);
-            } catch (Throwable ignore) {
-                FaultLogger.warn("record class parse failure failed: " + entryName);
             }
         }
 

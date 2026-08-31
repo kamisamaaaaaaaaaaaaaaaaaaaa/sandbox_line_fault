@@ -161,8 +161,7 @@ java -Dfault.tag=round-001 \
 | A2 | bootJar 定位 | 三级兜底（sun.java.command → /proc/self/cmdline → inputArguments）全部失败 | 硬保护 `PARSE` | 无（尚未有单元） | kill |
 | A3 | 建表校验 | 库连不上 / 缺表 | 硬保护 `DB` | 无 | kill |
 | A4 | 解析 bootJar | zip 打不开/损坏 | 硬保护 `PARSE` | 无 | kill |
-| A4 | 解析 class | 单个 class ASM 失败 | 跳过该类，记入 `failedClasses`，**不中断** | 无 | 继续 |
-| A4 | 解析 class | 上述失败类落表4 | 单条写失败仅 warn | 无 | 继续 |
+| A4 | 解析 class | **单个 class ASM 失败**（结果不完整即不放行） | 硬保护 `PARSE`（消息含失败 class 名） | 无 | kill |
 | A5 | 表1 登记 | `INSERT IGNORE` 冲突（说明 sha256 已存在）但紧接着 `findBySha256` 查不到行 = 数据不一致 | 硬保护 `DB` | 无 | kill |
 | A5 | 状态=completed | 该单元已解析过 | 跳过复用（不重复解析） | 不变 | 继续 |
 | A5 | 状态=未完成（pending / 历史 failed） | 首次解析，或上次解析中断、或他节点正在解析 | **本节点直接解析**（无抢占、无等待，表2 幂等收敛） | →completed | 继续 |
@@ -199,7 +198,7 @@ java -Dfault.tag=round-001 \
 
 | 结果 | 表1 | 表3 | 表4 | 进程 |
 |---|---|---|---|---|
-| 解析成功 | completed | — | 仅失败 class 明细 | 继续 |
+| 解析成功 | completed | — | — | 继续 |
 | 解析中途失败/超时 | 该单元**保持未完成**（pending，不回退） | — | 有 | kill |
 | 定位/建表/配置失败 | 无记录 | — | 有 | kill |
 | 挂载失败/超时 | **保持 completed** | — | 有 | kill |

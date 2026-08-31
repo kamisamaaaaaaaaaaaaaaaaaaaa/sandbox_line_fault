@@ -42,9 +42,6 @@ public final class BootJarParser {
         /** 解析出一条方法 */
         void accept(ClassMethodInfo method);
 
-        /** 单个 class 解析失败（该类已跳过，仅留痕，不中断整体流程） */
-        void acceptFailure(String entryName, String reason);
-
         /** 该单元内容解析结束：flush 剩余批次并收尾 */
         void finish();
     }
@@ -131,9 +128,8 @@ public final class BootJarParser {
                 }
             }, ClassReader.SKIP_CODE);
         } catch (Exception e) {
-            // 单个 class 解析失败只跳过该类，但必须留下痕迹（表4）
-            FaultLogger.warn("parse class bytes failed, skipped: " + entryName + " - " + e.getMessage());
-            sink.acceptFailure(entryName, e.getMessage());
+            // 单个 class 解析失败 = 解析结果不完整，按硬保护处理（宁可 kill 也不放过解析不完整的进程）
+            throw new IllegalStateException("parse class failed: " + entryName + " - " + e.getMessage(), e);
         }
     }
 
