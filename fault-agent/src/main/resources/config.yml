@@ -25,6 +25,10 @@ premain:
   timeout:
     ms: 600000
 
+log:
+  # 日志目录（相对路径基于目标进程工作目录；也可设为绝对路径如 /var/log/fault）
+  dir: logs
+
 orphan:
   # 异机 pending 孤儿判定阈值（分钟）
   threshold:

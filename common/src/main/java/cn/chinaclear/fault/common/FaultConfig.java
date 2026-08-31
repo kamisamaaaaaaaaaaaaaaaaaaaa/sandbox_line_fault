@@ -141,6 +141,11 @@ public final class FaultConfig {
         return getInt("orphan.threshold.minutes", 10);
     }
 
+    /** 日志目录（相对路径基于目标进程工作目录） */
+    public String logDir() {
+        return get("log.dir", "logs");
+    }
+
     /** 必填配置缺失即抛错（走硬保护，避免带错误配置运行） */
     private String require(String key) {
         String v = get(key, "");

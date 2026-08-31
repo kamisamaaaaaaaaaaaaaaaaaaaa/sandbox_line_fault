@@ -4,3 +4,7 @@ jdbc:
   host: 192.168.193.1
   username: root
   password: root123
+
+log:
+  # 模块日志目录（相对路径基于目标进程工作目录；建议与 agent 的 log.dir 保持一致）
+  dir: logs

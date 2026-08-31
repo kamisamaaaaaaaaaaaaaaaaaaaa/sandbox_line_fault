@@ -25,14 +25,16 @@ public final class FaultLogger {
     private FaultLogger() {
     }
 
-    /** 指定日志文件名（写入工作目录 logs/ 下），agent 与 module 各自初始化一次 */
-    public static void init(String fileName) {
+    /** 指定日志目录与文件名（目录不存在自动创建；不可写时降级为仅 stdout），agent 与 module 各自初始化一次 */
+    public static void init(String dirName, String fileName) {
         try {
-            Path dir = Paths.get("logs");
+            Path dir = Paths.get(dirName);
             Files.createDirectories(dir);
             logFile = dir.toAbsolutePath().resolve(fileName);
+            log("INFO", "log file: " + logFile, null);
         } catch (Throwable t) {
             logFile = null;
+            log("WARN", "log dir not writable (" + dirName + "), fallback to stdout only: " + t.getMessage(), null);
         }
     }
 

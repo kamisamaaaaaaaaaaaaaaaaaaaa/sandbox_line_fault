@@ -29,8 +29,8 @@ public final class FaultAgent {
     }
 
     public static void premain(String agentArgs, Instrumentation inst) {
-        FaultLogger.init("fault-agent.log");
         FaultConfig config = FaultConfig.load(agentArgs);
+        FaultLogger.init(config.logDir(), "fault-agent.log");
         long pid = currentPid();
         long deadline = System.currentTimeMillis() + config.premainTimeoutMs();
         FaultLogger.info("premain start: pid=" + pid + ", budget=" + config.premainTimeoutMs() + "ms"

@@ -47,6 +47,7 @@ java -Dfault.tag=round-001 \
 | `sandbox.home` | 否（默认 `/home/lys2/sandbox`） | sandbox 工具安装目录（挂载脚本自动取其 `bin/sandbox.sh`） |
 | `premain.timeout.ms` | 否（默认 600000） | premain 全程总预算（解析+落库+挂载），大项目按需调大 |
 | `orphan.threshold.minutes` | 否（默认 10） | 异机孤儿解析判定阈值（分钟） |
+| `log.dir` | 否（默认 `logs`） | 日志目录（agent 日志位置；挂载时自动传递给模块，agent/module 日志同目录）。相对路径基于目标进程工作目录，建议设绝对路径如 `/var/log/fault` |
 
 > `jdbc.url` 键可整体覆盖连接串（默认按 jdbc.host 拼接，已带 5s/10s 连接超时，勿随意去掉）。
 
@@ -65,7 +66,7 @@ java -Dfault.tag=round-001 \
 - 判重规则：同一行在**同一轮内**只会故障一次；换新 tag 后所有行重新可注入；不同轮次互不影响。
 - 集群语义：多节点并行时，同一行同一轮**最多导致集群内一个节点死亡**（由数据库唯一索引保证）。
 
-## 五、关键日志速查（`logs/fault-agent.log` 与 `logs/fault-module.log`）
+## 五、关键日志速查（`<log.dir>/fault-agent.log` 与 `<log.dir>/fault-module.log`，默认 `logs/`，可用 `log.dir` 配置指定）
 
 ### 正常链路（agent 日志）
 
