@@ -46,10 +46,10 @@ java -Dfault.tag=round-001 \
 | `jdbc.password` | **是** | 数据库密码 |
 | `lib.whitelist` | 否 | **lib 白名单**：bootJar 的 `BOOT-INF/lib/` 中需要解析的 jar 文件名，**正则表达式（对文件名全串匹配）**。**YAML 列表写法，一行一个 `- ` 开头**。**不配置该参数 = 只解析 `BOOT-INF/classes/`**。非法正则会被跳过并告警 |
 | `mount.enabled` | 否（默认 `true`） | **是否注入故障**：true = 解析后自动挂载模块并注入；**false = 纯解析模式**（只把类/方法清单落库，应用正常启动，不挂载不注入） |
-| `sandbox.home` | 否（默认 `/home/lys2/sandbox`） | sandbox 工具安装目录（挂载脚本自动取其 `bin/sandbox.sh`） |
-| `parse.timeout.ms` | 否（默认 `900000`，15 分钟） | **解析阶段超时**：解析 + 落库（含等待异机 pending），大项目按需调大 |
-| `mount.timeout.ms` | 否（默认 `1200000`，20 分钟） | **挂载阶段超时**：attach + 模块 inject + watch 注册，**与解析阶段各自独立计时** |
-| `orphan.threshold.minutes` | 否（默认 `10`） | 异机孤儿解析判定阈值（分钟） |
+| `sandbox.home` | **是**（`mount.enabled=true` 时） | sandbox 工具安装目录（挂载脚本自动取其 `bin/sandbox.sh`）。缺失在解析开始前即硬保护，不会白跑解析 |
+| `parse.timeout.ms` | 否（默认 `900000`，15 分钟） | **解析阶段总预算**：从 premain 进入时起算，覆盖全部单元的解析/落库/等待/接管，**期间发生多少次接管都不重置**；超时即硬保护 |
+| `mount.timeout.ms` | 否（默认 `1200000`，20 分钟） | **挂载阶段超时**：从解析完成、开始挂载时起算，与解析阶段**各自独立计时** |
+| `orphan.threshold.minutes` | 否（默认 `10`） | **孤儿 pending 判定阈值**：不是计时器，看的是表1 中该行自己的 `updated_at`（最后被任何节点触碰的时间，每次插入/接管/置状态都会刷新）。`now - updated_at` 超过阈值才允许他节点抢占接手；每次接管后重新计满 |
 | `log.dir` | 否（默认 `logs`） | agent 日志目录（相对路径基于目标进程工作目录，建议设绝对路径如 `/var/log/fault`） |
 
 ### fault-module 的 config.yml

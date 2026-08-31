@@ -157,9 +157,9 @@ public final class FaultConfig {
         return getBoolean("mount.enabled", true);
     }
 
-    /** sandbox 工具安装目录（挂载脚本位于其 bin/sandbox.sh） */
+    /** sandbox 工具安装目录（挂载脚本位于其 bin/sandbox.sh），必填（缺失即硬保护） */
     public String sandboxHome() {
-        return get("sandbox.home", "/home/lys2/sandbox");
+        return require("sandbox.home");
     }
 
     /** 解析阶段超时（定位后的解析+落库，含异机 pending 等待），默认 15 分钟 */

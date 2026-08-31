@@ -50,6 +50,10 @@ public final class FaultAgent {
                 throw HardProtectException.exception("DB", "schema check failed: " + e.getMessage(),
                         stackOf(e), null, bootJar);
             }
+            if (config.mountEnabled()) {
+                // fail-fast：挂载必需 sandbox.home（必填），缺失则不必白跑解析，直接硬保护
+                config.sandboxHome();
+            }
             List<Long> unitIds = ParseOrchestrator.parseAndStore(config, bootJar, parseDeadline);
             if (!config.mountEnabled()) {
                 FaultLogger.info("mount.enabled=false -> parse-only mode (results in DB), "
