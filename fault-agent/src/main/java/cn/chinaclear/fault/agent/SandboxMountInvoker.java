@@ -28,12 +28,10 @@ final class SandboxMountInvoker {
         String home = config.sandboxHome();
         String script = home + "/bin/sandbox.sh";
         String ids = FaultAgent.joinIds(unitIds);
-        // 把 agent 侧日志目录（绝对化）传给模块，保证 agent/module 日志同目录
-        String logDir = java.nio.file.Paths.get(config.logDir()).toAbsolutePath().toString();
         List<String> command = Arrays.asList(
                 "bash", script,
                 "-p", String.valueOf(pid),
-                "-d", "fault-module/inject?id=" + ids + "&logDir=" + logDir);
+                "-d", "fault-module/inject?id=" + ids);
         FaultLogger.info("mount cmd: " + command);
 
         java.io.File workDir = new java.io.File(home, "bin");

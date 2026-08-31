@@ -46,10 +46,8 @@ public class FaultKillModule implements Module {
     @Command("inject")
     public void inject(final Map<String, String> param) {
         FaultConfig config = FaultConfig.load(null);
-        // 日志目录：挂载命令参数（agent 传入，保证与 agent 日志同目录）优先，配置文件兜底
-        String logDir = param.get("logDir");
-        FaultLogger.init(logDir != null && !logDir.trim().isEmpty() ? logDir.trim() : config.logDir(),
-                "fault-module.log");
+        // module 日志目录独立配置（见本模块 config.yml 的 log.dir）
+        FaultLogger.init(config.logDir(), "fault-module.log");
         final long pid = currentPid();
 
         // 轮次 tag：JVM 系统属性 -Dfault.tag；缺失则直接 kill，绝不让进程无轮次标识地跑下去
