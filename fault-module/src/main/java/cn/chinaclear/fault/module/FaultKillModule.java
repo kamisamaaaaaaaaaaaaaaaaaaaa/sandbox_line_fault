@@ -88,7 +88,9 @@ public class FaultKillModule implements Module {
                 + " methods=" + methods.size() + ", tag=" + tag);
 
         final FaultRecordDao faultRecordDao = new FaultRecordDao(db);
-        final KillAdviceListener listener = new KillAdviceListener(faultRecordDao, classToUnitId, pid, tag);
+        final ErrorRecordDao errorRecordDao = new ErrorRecordDao(db);
+        final KillAdviceListener listener =
+                new KillAdviceListener(faultRecordDao, errorRecordDao, classToUnitId, pid, tag);
 
         // 每个类一次链式注册（方法逐个 onBehavior 链上）；watcher 常驻 matcher，对启动后才加载的类同样生效
         int registered = 0;
@@ -106,13 +108,53 @@ public class FaultKillModule implements Module {
                         .onWatch(listener);
                 registered++;
             } catch (Throwable t) {
-                // 单类注册失败不影响其他类
+                // 单类注册失败不影响其他类，但必须落表4 留痕
                 FaultLogger.error("register watch failed for class=" + entry.getKey(), t);
+                recordInjectError(errorRecordDao, "watch register failed for class=" + entry.getKey(),
+                        stackOf(t), unitIds);
             }
         }
         injectedUnits.addAll(unitIds);
         FaultLogger.info("inject done: registered=" + registered + "/" + classMethods.size()
                 + " classes, tag=" + tag + ", waiting for first line hit");
+    }
+
+    /** 表4 留痕：写失败仅告警（DB 可能正是不可用的一方） */
+    private void recordInjectError(ErrorRecordDao dao, String message, String detail, List<Long> unitIds) {
+        try {
+            ErrorRecord er = new ErrorRecord();
+            er.setPhase("INJECT");
+            er.setErrorType("EXCEPTION");
+            er.setMessage(message);
+            er.setDetail(detail);
+            er.setUnitIds(join(unitIds));
+            er.setBootJar(System.getProperty("sun.java.command"));
+            er.setHostname(MachineInfo.hostname());
+            er.setIp(MachineInfo.ip());
+            dao.insert(er);
+        } catch (Throwable ignore) {
+            FaultLogger.warn("write t_error_record failed (local log only)");
+        }
+    }
+
+    private static String join(List<Long> ids) {
+        if (ids == null || ids.isEmpty()) {
+            return null;
+        }
+        StringBuilder sb = new StringBuilder();
+        for (Long id : ids) {
+            if (sb.length() > 0) {
+                sb.append(',');
+            }
+            sb.append(id);
+        }
+        return sb.toString();
+    }
+
+    private static String stackOf(Throwable t) {
+        java.io.StringWriter sw = new java.io.StringWriter();
+        t.printStackTrace(new java.io.PrintWriter(sw));
+        return sw.toString();
     }
 
     /** 无 tag 策略：记录表4 后 kill（写表失败仅留本地日志，kill 必达） */

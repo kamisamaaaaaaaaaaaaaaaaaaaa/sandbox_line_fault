@@ -6,7 +6,9 @@ import cn.chinaclear.fault.common.FaultLogger;
 import cn.chinaclear.fault.common.JdbcHelper;
 import cn.chinaclear.fault.common.MachineInfo;
 import cn.chinaclear.fault.common.dao.ClassMethodDao;
+import cn.chinaclear.fault.common.dao.ErrorRecordDao;
 import cn.chinaclear.fault.common.dao.JarRecordDao;
+import cn.chinaclear.fault.common.model.ErrorRecord;
 import cn.chinaclear.fault.common.model.JarRecord;
 
 import java.util.ArrayList;
@@ -162,9 +164,40 @@ final class ParseOrchestrator {
             recordDao.markCompleted(unitId, classes.size(), unit.methods.size());
             FaultLogger.info("unit stored: type=" + unit.unitType + " source=" + unit.sourceJar
                     + " unitId=" + unitId + " classes=" + classes.size() + " methods=" + unit.methods.size());
+            // 解析失败的 class 逐个记录表4（不中断整体流程）
+            recordFailedClasses(config, unit, unitId, bootJarPath);
         } catch (RuntimeException e) {
             throw HardProtectException.exception("DB", "store unit failed: " + e.getMessage(),
                     FaultAgent.stackOf(e), Collections.singletonList(unitId), bootJarPath);
+        }
+    }
+
+    /** 单个 class 解析失败：逐条落表4（写失败仅告警，不影响主流程） */
+    private static void recordFailedClasses(FaultConfig config, BootJarParser.ParseUnit unit,
+                                            long unitId, String bootJarPath) {
+        if (unit.failedClasses.isEmpty()) {
+            return;
+        }
+        try {
+            JdbcHelper db = new JdbcHelper(config.jdbcUrl(), config.jdbcUsername(), config.jdbcPassword());
+            ErrorRecordDao dao = new ErrorRecordDao(db);
+            for (String failed : unit.failedClasses) {
+                ErrorRecord er = new ErrorRecord();
+                er.setPhase("PARSE");
+                er.setErrorType("EXCEPTION");
+                er.setMessage("class parse failed: " + failed);
+                er.setUnitIds(String.valueOf(unitId));
+                er.setBootJar(bootJarPath);
+                er.setHostname(MachineInfo.hostname());
+                er.setIp(MachineInfo.ip());
+                try {
+                    dao.insert(er);
+                } catch (Throwable ignore) {
+                    FaultLogger.warn("record class parse failure failed: " + failed);
+                }
+            }
+        } catch (Throwable t) {
+            FaultLogger.warn("record class parse failures failed (local log only): " + t.getMessage());
         }
     }
 

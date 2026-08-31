@@ -41,12 +41,15 @@ public final class BootJarParser {
         public final String sourceJar;
         public final String sha256;
         public final List<ClassMethodInfo> methods;
+        /** 解析失败的 class 条目描述（entry - 原因），由调用方记录表4 */
+        public final List<String> failedClasses;
 
         ParseUnit(String unitType, String sourceJar, String sha256, List<ClassMethodInfo> methods) {
             this.unitType = unitType;
             this.sourceJar = sourceJar;
             this.sha256 = sha256;
             this.methods = methods;
+            this.failedClasses = new ArrayList<>();
         }
     }
 
@@ -57,13 +60,14 @@ public final class BootJarParser {
             // 1) BOOT-INF/classes 整体一个单元
             List<String> classEntries = JarHashUtil.listClassesEntries(zip);
             List<ClassMethodInfo> classMethods = new ArrayList<>();
+            ParseUnit classesUnit = new ParseUnit(UNIT_CLASSES, bootJar.getFileName().toString(),
+                    JarHashUtil.sha256OfClassesDir(bootJar), classMethods);
             for (String name : classEntries) {
                 try (InputStream in = zip.getInputStream(zip.getEntry(name))) {
-                    parseClass(in, classMethods);
+                    parseClass(in, classMethods, name, classesUnit.failedClasses);
                 }
             }
-            out.add(new ParseUnit(UNIT_CLASSES, bootJar.getFileName().toString(),
-                    JarHashUtil.sha256OfClassesDir(bootJar), classMethods));
+            out.add(classesUnit);
 
             // 2) BOOT-INF/lib 白名单单元
             for (Enumeration<? extends ZipEntry> en = zip.entries(); en.hasMoreElements(); ) {
@@ -81,16 +85,17 @@ public final class BootJarParser {
                     jarBytes = JarHashUtil.readAll(in);
                 }
                 List<ClassMethodInfo> libMethods = new ArrayList<>();
+                ParseUnit libUnit = new ParseUnit(UNIT_LIB_JAR, jarName,
+                        JarHashUtil.sha256OfStream(new ByteArrayInputStream(jarBytes)), libMethods);
                 try (ZipInputStream zin = new ZipInputStream(new ByteArrayInputStream(jarBytes))) {
                     ZipEntry classEntry;
                     while ((classEntry = zin.getNextEntry()) != null) {
                         if (!classEntry.isDirectory() && classEntry.getName().endsWith(".class")) {
-                            parseClass(zin, libMethods);
+                            parseClass(zin, libMethods, jarName + "!" + classEntry.getName(), libUnit.failedClasses);
                         }
                     }
                 }
-                String libHash = JarHashUtil.sha256OfStream(new ByteArrayInputStream(jarBytes));
-                out.add(new ParseUnit(UNIT_LIB_JAR, jarName, libHash, libMethods));
+                out.add(libUnit);
             }
         } catch (IOException e) {
             throw new IllegalStateException("parse bootJar failed: " + bootJar + " - " + e.getMessage(), e);
@@ -103,7 +108,9 @@ public final class BootJarParser {
      * 排除 &lt;clinit&gt;；synthetic 方法仅纳入 lambda（lambda$ 前缀，其体内为用户逻辑），
      * 其余 synthetic（bridge/access$ 转发）排除以避免重复命中。
      */
-    private static void parseClass(InputStream in, final List<ClassMethodInfo> out) {
+    /** @param failedClasses 解析失败时写入 "entry - 原因"，供上层记录表4 */
+    private static void parseClass(InputStream in, final List<ClassMethodInfo> out,
+                                   final String entryName, final List<String> failedClasses) {
         try {
             final ClassReader reader = new ClassReader(in);
             final String className = reader.getClassName().replace('/', '.');
@@ -124,8 +131,9 @@ public final class BootJarParser {
                 }
             }, ClassReader.SKIP_CODE);
         } catch (Exception e) {
-            // 单个 class 解析失败只跳过该类，不中断整体解析
-            FaultLogger.warn("parse class bytes failed, skipped: " + e.getMessage());
+            // 单个 class 解析失败只跳过该类，但必须留下痕迹（表4）
+            FaultLogger.warn("parse class bytes failed, skipped: " + entryName + " - " + e.getMessage());
+            failedClasses.add(entryName + " - " + e.getMessage());
         }
     }
 

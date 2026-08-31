@@ -3,7 +3,9 @@ package cn.chinaclear.fault.module;
 import cn.chinaclear.fault.common.FaultLogger;
 import cn.chinaclear.fault.common.KillUtil;
 import cn.chinaclear.fault.common.MachineInfo;
+import cn.chinaclear.fault.common.dao.ErrorRecordDao;
 import cn.chinaclear.fault.common.dao.FaultRecordDao;
+import cn.chinaclear.fault.common.model.ErrorRecord;
 import cn.chinaclear.fault.common.model.FaultRecord;
 import com.alibaba.jvm.sandbox.api.listener.ext.Advice;
 import com.alibaba.jvm.sandbox.api.listener.ext.AdviceListener;
@@ -19,10 +21,12 @@ import java.util.concurrent.ConcurrentHashMap;
  * DuplicateKey = 该行本轮已被集群内其他节点触发 → 放行继续执行。
  * 正确性完全由数据库唯一索引保证；preemptedLines 仅缓存"本进程已确认被抢占的行"，
  * 避免存活节点在热路径行上反复撞库。
+ * 所有异常路径（kill 失败、记录失败、DB 异常）均落表4。
  */
 final class KillAdviceListener extends AdviceListener {
 
     private final FaultRecordDao faultRecordDao;
+    private final ErrorRecordDao errorRecordDao;
     private final Map<String, Long> classToUnitId;
     private final long pid;
     /** 轮次标识（JVM -Dfault.tag），判重仅限轮内 */
@@ -30,8 +34,10 @@ final class KillAdviceListener extends AdviceListener {
     /** 本轮已确认被抢占的行（避免存活节点在热路径行上反复撞库） */
     private final Set<String> preemptedLines = ConcurrentHashMap.newKeySet();
 
-    KillAdviceListener(FaultRecordDao faultRecordDao, Map<String, Long> classToUnitId, long pid, String tag) {
+    KillAdviceListener(FaultRecordDao faultRecordDao, ErrorRecordDao errorRecordDao,
+                       Map<String, Long> classToUnitId, long pid, String tag) {
         this.faultRecordDao = faultRecordDao;
+        this.errorRecordDao = errorRecordDao;
         this.classToUnitId = classToUnitId;
         this.pid = pid;
         this.tag = tag;
@@ -39,6 +45,7 @@ final class KillAdviceListener extends AdviceListener {
 
     @Override
     protected void beforeLine(Advice advice, int lineNum) {
+        String lineKey = null;
         try {
             final String className = advice.getBehavior().getDeclaringClass().getName();
             final Long unitId = classToUnitId.get(className);
@@ -46,7 +53,7 @@ final class KillAdviceListener extends AdviceListener {
                 return;
             }
             final String method = advice.getBehavior().getName();
-            final String lineKey = className + "#" + method + "#" + lineNum;
+            lineKey = className + "#" + method + "#" + lineNum;
             if (preemptedLines.contains(lineKey)) {
                 return;
             }
@@ -72,16 +79,15 @@ final class KillAdviceListener extends AdviceListener {
                         + " thread=" + fr.getThreadName()
                         + " machine=" + fr.getHostname() + "/" + fr.getIp());
                 if (!KillUtil.killCurrentProcess(pid)) {
-                    // 极端场景：所有 kill 手段未生效（进程仍存活）——回滚故障记录，
-                    // 避免脏判重数据永久阻止该行本轮注入，随后 halt 兜底
-                    FaultLogger.error("kill not effective, rollback fault record: " + lineKey);
+                    // kill 手段未生效：回滚记录并放行进程（进程继续运行，不在本工具内强行 halt）
+                    FaultLogger.error("kill not effective, rollback fault record and release: " + lineKey);
+                    recordError("kill not effective (process still alive), fault record rolled back", lineKey, null);
                     try {
                         faultRecordDao.delete(fr);
                     } catch (Throwable ignore) {
                         // rollback failure is irrelevant
                     }
                     preemptedLines.remove(lineKey);
-                    Runtime.getRuntime().halt(137);
                 }
                 // kill 生效：进程终止，本方法不会正常返回
             } else {
@@ -91,8 +97,33 @@ final class KillAdviceListener extends AdviceListener {
                         + "), release execution: " + lineKey);
             }
         } catch (Throwable t) {
-            // 抢占/记录失败绝不能破坏业务方法本身的执行
-            FaultLogger.error("beforeLine handling failed, release line execution", t);
+            // 任何异常：记表4 后放行该行，绝不破坏业务方法本身的执行
+            FaultLogger.error("beforeLine handling failed, release line execution: " + lineKey, t);
+            recordError("beforeLine failed: " + t.getMessage(), lineKey, t);
         }
+    }
+
+    /** 表4 留痕：写失败仅告警（此时可能正是 DB 不可用） */
+    private void recordError(String message, String lineKey, Throwable t) {
+        try {
+            ErrorRecord er = new ErrorRecord();
+            er.setPhase("INJECT");
+            er.setErrorType("EXCEPTION");
+            er.setMessage(message + (lineKey != null ? " (" + lineKey + ")" : ""));
+            er.setDetail(t == null ? null : stackOf(t));
+            er.setUnitIds(null);
+            er.setBootJar(System.getProperty("sun.java.command"));
+            er.setHostname(MachineInfo.hostname());
+            er.setIp(MachineInfo.ip());
+            errorRecordDao.insert(er);
+        } catch (Throwable ignore) {
+            FaultLogger.warn("write t_error_record failed (local log only)");
+        }
+    }
+
+    private static String stackOf(Throwable t) {
+        java.io.StringWriter sw = new java.io.StringWriter();
+        t.printStackTrace(new java.io.PrintWriter(sw));
+        return sw.toString();
     }
 }
