@@ -108,9 +108,44 @@ final class ParseOrchestrator {
             } else {
                 FaultLogger.info("claim lost to other node (" + reason + "), skip: unitId=" + unitId);
             }
-        } else {
-            FaultLogger.info("unit pending on other node (in progress), skip: source=" + unit.sourceJar
-                    + " unitId=" + unitId);
+            return unitId;
+        }
+
+        // 异机 pending 且未超时：其他节点解析中——轮询等待其完成（数据齐了才能保证本节点挂载覆盖完整）
+        while (true) {
+            checkDeadline(deadline, bootJarPath, snapshot(inFlight));
+            try {
+                Thread.sleep(1000L);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw HardProtectException.exception("PARSE", "wait interrupted", null, snapshot(inFlight), bootJarPath);
+            }
+            JarRecord latest = recordDao.findBySha256(unit.sha256);
+            if (latest == null) {
+                throw HardProtectException.exception("DB", "record disappeared while waiting: " + unit.sha256,
+                        null, snapshot(inFlight), bootJarPath);
+            }
+            if ("completed".equals(latest.getStatus())) {
+                break;
+            }
+            if ("failed".equals(latest.getStatus())
+                    && recordDao.claimForReparse(unitId, MachineInfo.hostname(), MachineInfo.ip())) {
+                // 对方解析失败置了 failed，本节点接手
+                inFlight.add(unitId);
+                storeUnit(recordDao, methodDao, unit, unitId, bootJarPath);
+                removeInFlight(inFlight, unitId);
+                break;
+            }
+            // 仍是 pending：若 updated_at 超过孤儿阈值则接手重解析
+            if ("pending".equals(latest.getStatus())
+                    && System.currentTimeMillis() - latest.getUpdatedAt().getTime()
+                    >= (long) config.orphanThresholdMinutes() * 60000L
+                    && recordDao.claimForReparse(unitId, MachineInfo.hostname(), MachineInfo.ip())) {
+                inFlight.add(unitId);
+                storeUnit(recordDao, methodDao, unit, unitId, bootJarPath);
+                removeInFlight(inFlight, unitId);
+                break;
+            }
         }
         return unitId;
     }

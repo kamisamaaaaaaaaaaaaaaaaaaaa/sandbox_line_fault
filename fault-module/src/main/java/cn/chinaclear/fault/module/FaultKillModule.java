@@ -69,8 +69,9 @@ public class FaultKillModule implements Module {
         JdbcHelper db = new JdbcHelper(config.jdbcUrl(), config.jdbcUsername(), config.jdbcPassword());
         List<ClassMethodInfo> methods = new ClassMethodDao(db).findByUnitIds(unitIds);
         if (methods.isEmpty()) {
-            FaultLogger.warn("no methods found for unitIds=" + unitIds + ", nothing to watch");
-            return;
+            // 硬保护：挂载了却拿不到方法清单 = 保护不完整，按策略失败（agent 侧将 kill）
+            throw new IllegalStateException(
+                    "no methods found for unitIds=" + unitIds + " (check parse results in t_class_method)");
         }
 
         // 类分组 + 方法名去重（onBehavior 按名匹配，天然覆盖重载）；类名 → unitId 映射供表3 记录
