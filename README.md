@@ -47,7 +47,8 @@ java -Dfault.tag=round-001 \
 | `lib.whitelist` | 否 | **lib 白名单**：bootJar 的 `BOOT-INF/lib/` 中需要解析的 jar 文件名，**正则表达式（对文件名全串匹配）**，**逗号分隔多个**。例：`lib.whitelist=test-lib.*,biz-.*-common\.jar,biz-dao-1\.0\.0\.jar`。留空 = 只解析 `BOOT-INF/classes/`。非法正则会被跳过并告警 |
 | `mount.enabled` | 否（默认 `true`） | **是否注入故障**：true = 解析后自动挂载模块并注入；**false = 纯解析模式**（只把类/方法清单落库，应用正常启动，不挂载不注入） |
 | `sandbox.home` | 否（默认 `/home/lys2/sandbox`） | sandbox 工具安装目录（挂载脚本自动取其 `bin/sandbox.sh`） |
-| `premain.timeout.ms` | 否（默认 `600000`） | premain 全程总预算（解析+落库+挂载），大项目按需调大 |
+| `parse.timeout.ms` | 否（默认 `900000`，15 分钟） | **解析阶段超时**：解析 + 落库（含等待异机 pending），大项目按需调大 |
+| `mount.timeout.ms` | 否（默认 `1200000`，20 分钟） | **挂载阶段超时**：attach + 模块 inject + watch 注册，**与解析阶段各自独立计时** |
 | `orphan.threshold.minutes` | 否（默认 `10`） | 异机孤儿解析判定阈值（分钟） |
 | `log.dir` | 否（默认 `logs`） | agent 日志目录（相对路径基于目标进程工作目录，建议设绝对路径如 `/var/log/fault`） |
 
@@ -58,7 +59,11 @@ java -Dfault.tag=round-001 \
 | `jdbc.url` | **是** | 故障库连接串，须与 agent 指向同一库 |
 | `jdbc.username` | **是** | 数据库用户 |
 | `jdbc.password` | **是** | 数据库密码 |
+| `inject.batch.size` | 否（默认 `5000`） | 分批读取方法清单的批大小（避免大项目一次性读入打爆内存） |
+| `exclude.methods` | 否 | **注入排除**：方法正则，**全串匹配 `完全限定类名.方法名`**，逗号分隔。排除整类写 `cn\.demo\.OrderService\..*`，排除单方法写 `cn\.demo\.OrderService\.pay`；命中的方法不注册 watch（注册前过滤）。非法正则会被跳过并告警 |
 | `log.dir` | 否（默认 `logs`） | 模块日志目录（module 独立配置，与 agent 的 log.dir 互不影响） |
+
+> **正则转义（agent 的 `lib.whitelist` 与 module 的 `exclude.methods` 规则相同）**：两者都是 Java 正则，`.` 是通配符；要表示字面量的点请写 `\.`（不转义也能匹配到，但会放宽，例如 `OrderService` 会连 `OrderXService` 一起匹配）。YAML 中**直接写 `\.`** 或**单引号** `'...\...'` 均可；若用**双引号**包裹，必须双写反斜杠 `"cn\\.demo\\..*"`，否则 YAML 直接报扫描错误（实测：双引号里写单个 `\.` 会抛 `while scanning a double-quoted scalar`）。
 
 ## 四、轮次（tag）机制
 
