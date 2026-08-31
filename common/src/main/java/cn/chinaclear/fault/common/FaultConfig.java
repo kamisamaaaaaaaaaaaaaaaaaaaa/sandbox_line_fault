@@ -139,6 +139,11 @@ public final class FaultConfig {
         return get("log.dir", "logs");
     }
 
+    /** 模块侧分批读取方法清单的批大小（防大项目一次性读入打爆内存） */
+    public int injectBatchSize() {
+        return getInt("inject.batch.size", 5000);
+    }
+
     /** 必填配置缺失即抛错（走硬保护，避免带错误配置运行） */
     private String require(String key) {
         String v = get(key, "");

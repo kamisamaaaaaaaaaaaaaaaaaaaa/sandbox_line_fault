@@ -5,6 +5,11 @@ jdbc:
   username: root
   password: root123
 
+inject:
+  # 分批读取方法清单的批大小（避免大项目一次性读入打爆内存）
+  batch:
+    size: 5000
+
 log:
-  # 模块日志目录（相对路径基于目标进程工作目录；建议与 agent 的 log.dir 保持一致）
+  # 模块日志目录（相对路径基于目标进程工作目录）
   dir: logs

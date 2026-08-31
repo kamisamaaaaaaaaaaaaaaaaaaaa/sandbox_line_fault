@@ -49,8 +49,41 @@ public final class ClassMethodDao {
         return out;
     }
 
+    /**
+     * 游标分页读取：按 id 升序取大于 lastId 的一批（避免 OFFSET 漂移，也避免一次全量读入内存）。
+     * @return 该批数据（按 id 升序），空列表表示已读完
+     */
+    public List<ClassMethodInfo> findPageByUnitIds(List<Long> unitIds, long lastId, int batchSize) {
+        List<ClassMethodInfo> out = new ArrayList<>();
+        if (unitIds == null || unitIds.isEmpty() || batchSize <= 0) {
+            return out;
+        }
+        for (List<Long> part : partition(unitIds, 500)) {
+            StringBuilder in = new StringBuilder();
+            for (int i = 0; i < part.size(); i++) {
+                if (i > 0) {
+                    in.append(',');
+                }
+                in.append('?');
+            }
+            String sql = "SELECT id, unit_id, class_name, method_name, method_desc"
+                    + " FROM t_class_method WHERE unit_id IN (" + in + ") AND id > ?"
+                    + " ORDER BY id LIMIT " + batchSize;
+            Object[] params = new Object[part.size() + 1];
+            for (int i = 0; i < part.size(); i++) {
+                params[i] = part.get(i);
+            }
+            params[part.size()] = lastId;
+            out.addAll(db.query(sql, params, ClassMethodDao::map));
+        }
+        // 多段 IN 合并后仍按 id 升序返回，保证游标推进正确
+        out.sort((a, b) -> Long.compare(a.getId(), b.getId()));
+        return out.size() > batchSize ? new ArrayList<>(out.subList(0, batchSize)) : out;
+    }
+
     private static ClassMethodInfo map(ResultSet rs) throws java.sql.SQLException {
         return new ClassMethodInfo(
+                rs.getLong("id"),
                 rs.getLong("unit_id"),
                 rs.getString("class_name"),
                 rs.getString("method_name"),

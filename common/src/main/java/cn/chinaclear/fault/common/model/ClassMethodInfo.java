@@ -9,6 +9,8 @@ import lombok.NoArgsConstructor;
 @NoArgsConstructor
 @AllArgsConstructor
 public class ClassMethodInfo {
+    /** 表2 主键，模块侧按此游标分批读取 */
+    private long id;
     /** 表1 t_jar_record 主键；模块间传参/表3 关联均用该短 id，不用长 hash */
     private long unitId;
     /** 完全限定名（点分），如 com.demo.OrderService */

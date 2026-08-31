@@ -49,50 +49,94 @@ public class FaultKillModule implements Module {
         // module 日志目录独立配置（见本模块 config.yml 的 log.dir）
         FaultLogger.init(config.logDir(), "fault-module.log");
         final long pid = currentPid();
-
-        // 轮次 tag：JVM 系统属性 -Dfault.tag；缺失则直接 kill，绝不让进程无轮次标识地跑下去
-        final String tag = System.getProperty("fault.tag", "").trim();
-        if (tag.isEmpty()) {
-            FaultLogger.error("jvm property 'fault.tag' missing -> kill process per policy (no injection without a round tag)");
-            recordMissingTag(config, pid, param);
-            KillUtil.killCurrentProcess(pid);
-            return;
-        }
-
-        List<Long> unitIds = parseUnitIds(param.get("id"));
-        if (injectedUnits.containsAll(unitIds)) {
-            FaultLogger.info("inject skipped: units already injected, unitIds=" + unitIds + ", tag=" + tag);
-            return;
-        }
-        FaultLogger.info("inject requested, unitIds=" + unitIds + ", tag=" + tag);
-
-        JdbcHelper db = new JdbcHelper(config.jdbcUrl(), config.jdbcUsername(), config.jdbcPassword());
-        List<ClassMethodInfo> methods = new ClassMethodDao(db).findByUnitIds(unitIds);
-        if (methods.isEmpty()) {
-            // 硬保护：挂载了却拿不到方法清单 = 保护不完整，按策略失败（agent 侧将 kill）
-            throw new IllegalStateException(
-                    "no methods found for unitIds=" + unitIds + " (check parse results in t_class_method)");
-        }
-
-        // 类分组 + 方法名去重（onBehavior 按名匹配，天然覆盖重载）；类名 → unitId 映射供表3 记录
-        Map<String, List<String>> classMethods = new LinkedHashMap<>();
-        Map<String, Long> classToUnitId = new HashMap<>();
-        for (ClassMethodInfo m : methods) {
-            List<String> names = classMethods.computeIfAbsent(m.getClassName(), k -> new ArrayList<>());
-            if (!names.contains(m.getMethodName())) {
-                names.add(m.getMethodName());
+        List<Long> unitIds = null;
+        try {
+            // 轮次 tag：JVM 系统属性 -Dfault.tag；缺失则直接在模块内 kill（不依赖 agent 传递）
+            final String tag = System.getProperty("fault.tag", "").trim();
+            if (tag.isEmpty()) {
+                FaultLogger.error("jvm property 'fault.tag' missing -> kill process per policy (no injection without a round tag)");
+                recordMissingTag(config, pid, param);
+                KillUtil.killCurrentProcess(pid);
+                return;
             }
-            classToUnitId.put(m.getClassName(), m.getUnitId());
+
+            unitIds = parseUnitIds(param.get("id"));
+            if (injectedUnits.containsAll(unitIds)) {
+                FaultLogger.info("inject skipped: units already injected, unitIds=" + unitIds + ", tag=" + tag);
+                return;
+            }
+            FaultLogger.info("inject requested, unitIds=" + unitIds + ", tag=" + tag
+                    + ", batchSize=" + config.injectBatchSize());
+
+            JdbcHelper db = new JdbcHelper(config.jdbcUrl(), config.jdbcUsername(), config.jdbcPassword());
+            ClassMethodDao methodDao = new ClassMethodDao(db);
+            FaultRecordDao faultRecordDao = new FaultRecordDao(db);
+            ErrorRecordDao errorRecordDao = new ErrorRecordDao(db);
+
+            // 游标分批读取：每批注册后即可被回收，避免大项目全量方法一次性读入内存
+            long lastId = 0L;
+            long totalMethods = 0L;
+            int totalClasses = 0;
+            int registered = 0;
+            while (true) {
+                List<ClassMethodInfo> batch = methodDao.findPageByUnitIds(unitIds, lastId, config.injectBatchSize());
+                if (batch.isEmpty()) {
+                    break;
+                }
+                for (ClassMethodInfo m : batch) {
+                    lastId = Math.max(lastId, m.getId());
+                }
+                totalMethods += batch.size();
+
+                // 本批：类分组 + 方法名去重（onBehavior 按名匹配，天然覆盖重载）；类名 → unitId 映射供表3 记录
+                Map<String, List<String>> classMethods = new LinkedHashMap<>();
+                Map<String, Long> classToUnitId = new HashMap<>();
+                for (ClassMethodInfo m : batch) {
+                    List<String> names = classMethods.computeIfAbsent(m.getClassName(), k -> new ArrayList<>());
+                    if (!names.contains(m.getMethodName())) {
+                        names.add(m.getMethodName());
+                    }
+                    classToUnitId.put(m.getClassName(), m.getUnitId());
+                }
+                totalClasses += classMethods.size();
+
+                // 每批一个 listener（只持本批映射，随批次释放）
+                KillAdviceListener listener =
+                        new KillAdviceListener(faultRecordDao, errorRecordDao, classToUnitId, pid, tag);
+                registered += registerBatch(classMethods, listener, errorRecordDao, unitIds);
+                FaultLogger.info("batch registered: methods=" + batch.size()
+                        + " classes=" + classMethods.size() + " lastId=" + lastId);
+            }
+
+            if (totalMethods == 0) {
+                // 保护不完整：挂载了却没有任何方法 = 绝不放行
+                FaultLogger.error("no methods found for unitIds=" + unitIds + " -> kill per policy");
+                recordInjectError(errorRecordDao,
+                        "no methods found for unitIds=" + unitIds + " (check t_class_method)", null, unitIds);
+                KillUtil.killCurrentProcess(pid);
+                return;
+            }
+
+            injectedUnits.addAll(unitIds);
+            FaultLogger.info("inject done: registered=" + registered + "/" + totalClasses
+                    + " classes, methods=" + totalMethods + ", tag=" + tag + ", waiting for first line hit");
+        } catch (Throwable t) {
+            // 模块内自行兜住所有致命异常：表4 留痕后直接 kill（不依赖 sandbox/agent 传递）
+            FaultLogger.error("inject failed, kill process per policy", t);
+            try {
+                recordInjectError(new ErrorRecordDao(new JdbcHelper(config.jdbcUrl(),
+                                config.jdbcUsername(), config.jdbcPassword())),
+                        "inject failed: " + t.getMessage(), stackOf(t), unitIds);
+            } catch (Throwable ignore) {
+                // DB 不可用：仅本地日志
+            }
+            KillUtil.killCurrentProcess(pid);
         }
-        FaultLogger.info("watch target: classes=" + classMethods.size()
-                + " methods=" + methods.size() + ", tag=" + tag);
+    }
 
-        final FaultRecordDao faultRecordDao = new FaultRecordDao(db);
-        final ErrorRecordDao errorRecordDao = new ErrorRecordDao(db);
-        final KillAdviceListener listener =
-                new KillAdviceListener(faultRecordDao, errorRecordDao, classToUnitId, pid, tag);
-
-        // 每个类一次链式注册（方法逐个 onBehavior 链上）；watcher 常驻 matcher，对启动后才加载的类同样生效
+    /** 注册一批类的 watch（每个类一次链式注册，方法逐个 onBehavior 链上）；watcher 常驻 matcher，对后加载类同样生效 */
+    private int registerBatch(Map<String, List<String>> classMethods, KillAdviceListener listener,
+                             ErrorRecordDao errorRecordDao, List<Long> unitIds) {
         int registered = 0;
         for (Map.Entry<String, List<String>> entry : classMethods.entrySet()) {
             try {
@@ -114,9 +158,7 @@ public class FaultKillModule implements Module {
                         stackOf(t), unitIds);
             }
         }
-        injectedUnits.addAll(unitIds);
-        FaultLogger.info("inject done: registered=" + registered + "/" + classMethods.size()
-                + " classes, tag=" + tag + ", waiting for first line hit");
+        return registered;
     }
 
     /** 表4 留痕：写失败仅告警（DB 可能正是不可用的一方） */

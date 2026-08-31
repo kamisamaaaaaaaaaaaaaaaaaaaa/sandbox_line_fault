@@ -126,7 +126,7 @@ public final class BootJarParser {
                     if (synthetic && !isLambda) {
                         return null;
                     }
-                    out.add(new ClassMethodInfo(0L, className, name, desc));
+                    out.add(new ClassMethodInfo(0L, 0L, className, name, desc));
                     return null;
                 }
             }, ClassReader.SKIP_CODE);
