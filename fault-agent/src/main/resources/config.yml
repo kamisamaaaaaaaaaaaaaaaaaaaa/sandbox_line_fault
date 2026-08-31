@@ -8,12 +8,13 @@ jdbc:
   password: root123
 
 lib:
-  # BOOT-INF/lib 第三方白名单：正则表达式（对 jar 文件名全串匹配），逗号分隔多个
-  # 例：test-lib.*（前缀）、.*-common-.*\.jar（片段）、biz-dao-1\.0\.0\.jar（精确）
+  # BOOT-INF/lib 第三方白名单：正则表达式（对 jar 文件名全串匹配），一行一个（"- " 开头）
   # 正则中的 . 是通配符，表示字面量点请写 \.（不转义也能匹配，但会放宽，如 foo-1.0.jar 会匹配 foo-1x0yjar）
-  # YAML 写法：不加引号直接写 \. 即可；若用双引号包裹则必须双写反斜杠 "\\."（单引号同不加引号）
-  # 留空 = 不解析任何 lib
-  whitelist: test-lib.*
+  # 留空列表（whitelist: []）= 不解析任何 lib
+  whitelist:
+    - test-lib.*
+    # - biz-.*-common\.jar
+    # - biz-dao-1\.0\.0\.jar
 
 mount:
   # 是否挂载故障模块：true=解析后自动挂载并注入故障；false=纯解析模式（只落库，应用正常启动不注入）

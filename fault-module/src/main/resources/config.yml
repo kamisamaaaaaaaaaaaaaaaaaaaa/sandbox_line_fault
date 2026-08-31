@@ -11,12 +11,12 @@ inject:
     size: 5000
 
 exclude:
-  # 注入排除：方法正则，全串匹配 "完全限定类名.方法名"，逗号分隔多个，命中的方法不注入
-  # 排除某个类的所有方法：cn\.demo\.OrderService\..*
-  # 排除单个方法：cn\.demo\.OrderService\.pay
+  # 注入排除：方法正则，全串匹配 "完全限定类名.方法名"，一行一个（"- " 开头），命中的方法不注入
+  # 排除某个类的所有方法：- cn\.demo\.OrderService\..*
+  # 排除单个方法：- cn\.demo\.OrderService\.pay
   # 正则中的 . 是通配符，表示字面量点请写 \.（不转义也能匹配，但会放宽，如 OrderService 会匹配 OrderXService）
-  # YAML 写法：不加引号直接写 \. 即可；若用双引号包裹则必须双写反斜杠 "\\."（单引号同不加引号）
-  methods: ""
+  # 空列表（methods: []）= 不排除任何方法
+  methods: []
 
 log:
   # 模块日志目录（相对路径基于目标进程工作目录）

@@ -48,14 +48,19 @@ public final class FaultConfig {
                 pair = pair.trim();
                 int i = pair.indexOf('=');
                 if (i > 0) {
-                    c.props.setProperty(pair.substring(0, i).trim(), pair.substring(i + 1).trim());
+                    String k = pair.substring(0, i).trim();
+                    // 覆盖列表键时清除原列表条目（key.0/key.1/...），保证整体替换语义
+                    for (int j = 0; c.props.containsKey(k + "." + j); j++) {
+                        c.props.remove(k + "." + j);
+                    }
+                    c.props.setProperty(k, pair.substring(i + 1).trim());
                 }
             }
         }
         return c;
     }
 
-    /** 嵌套 Map 展平为点分键：jdbc.host=... */
+    /** 嵌套 Map 展平为点分键：jdbc.host=...；List 展平为 key.0/key.1/...（供 getList 读取） */
     @SuppressWarnings("unchecked")
     private static void flatten(String prefix, Map<String, Object> src, Properties out) {
         for (Map.Entry<String, Object> e : src.entrySet()) {
@@ -63,10 +68,41 @@ public final class FaultConfig {
             Object value = e.getValue();
             if (value instanceof Map) {
                 flatten(key, (Map<String, Object>) value, out);
+            } else if (value instanceof List) {
+                List<Object> list = (List<Object>) value;
+                for (int i = 0; i < list.size(); i++) {
+                    Object item = list.get(i);
+                    if (item != null) {
+                        out.setProperty(key + "." + i, String.valueOf(item));
+                    }
+                }
             } else if (value != null) {
                 out.setProperty(key, String.valueOf(value));
             }
         }
+    }
+
+    /**
+     * 列表配置：优先读 YAML 列表形式（key.0、key.1...，对应 yml 里一行一个 "- " 条目）；
+     * 无列表条目时回退逗号分隔写法（也用于 agentArgs 覆盖传值）。
+     */
+    public List<String> getList(String key) {
+        List<String> out = new ArrayList<>();
+        int i = 0;
+        while (true) {
+            String v = props.getProperty(key + "." + i);
+            if (v == null) {
+                break;
+            }
+            if (!v.trim().isEmpty()) {
+                out.add(v.trim());
+            }
+            i++;
+        }
+        if (!out.isEmpty()) {
+            return out;
+        }
+        return splitList(key);
     }
 
     public String get(String key, String def) {
@@ -107,15 +143,9 @@ public final class FaultConfig {
         return require("jdbc.password");
     }
 
-    /** BOOT-INF/lib 白名单：正则表达式（对 jar 文件名全串匹配），逗号分隔 */
+    /** BOOT-INF/lib 白名单：正则表达式（对 jar 文件名全串匹配），YAML 列表一行一个（兼容逗号分隔） */
     public List<String> libWhitelist() {
-        List<String> out = new ArrayList<>();
-        for (String s : get("lib.whitelist", "").split(",")) {
-            if (!s.trim().isEmpty()) {
-                out.add(s.trim());
-            }
-        }
-        return out;
+        return getList("lib.whitelist");
     }
 
     /** 是否挂载故障模块：false = 纯解析模式（只落库不注入故障，应用正常启动） */
@@ -144,11 +174,11 @@ public final class FaultConfig {
     }
 
     /**
-     * 注入排除：方法正则，对 "完全限定类名.方法名" 全串匹配，逗号分隔，命中的方法不注入。
+     * 注入排除：方法正则，对 "完全限定类名.方法名" 全串匹配，YAML 列表一行一个（兼容逗号分隔），命中的方法不注入。
      * 排除某个类的所有方法写 "全限定类名\..*"，例如 cn\.demo\.OrderService\..*
      */
     public List<String> excludeMethods() {
-        return splitList("exclude.methods");
+        return getList("exclude.methods");
     }
 
     private List<String> splitList(String key) {
