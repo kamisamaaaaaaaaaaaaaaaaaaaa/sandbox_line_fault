@@ -22,14 +22,9 @@ sandbox:
   home: /home/lys/sandbox
 
 premain:
-  # 解析阶段超时（定位 bootJar 后的解析+落库，含异机 pending 等待），毫秒
-  parse:
-    timeout:
-      ms: 600000
-  # 挂载阶段超时（sandbox attach + 模块 inject + watch 注册），毫秒，独立计时
-  mount:
-    timeout:
-      ms: 60000
+  # premain 全程总预算（解析+落库+挂载），毫秒
+  timeout:
+    ms: 600000
 
 orphan:
   # 异机 pending 孤儿判定阈值（分钟）

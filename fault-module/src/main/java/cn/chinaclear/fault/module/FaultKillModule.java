@@ -103,7 +103,8 @@ public class FaultKillModule implements Module {
                 // 每批一个 listener（只持本批映射，随批次释放）
                 KillAdviceListener listener =
                         new KillAdviceListener(faultRecordDao, errorRecordDao, classToUnitId, pid, tag);
-                registered += registerBatch(classMethods, listener, errorRecordDao, unitIds);
+                registered += registerBatch(classMethods, listener, errorRecordDao, unitIds,
+                        config.excludeClasses(), config.excludeMethods());
                 FaultLogger.info("batch registered: methods=" + batch.size()
                         + " classes=" + classMethods.size() + " lastId=" + lastId);
             }
@@ -134,13 +135,34 @@ public class FaultKillModule implements Module {
         }
     }
 
-    /** 注册一批类的 watch（每个类一次链式注册，方法逐个 onBehavior 链上）；watcher 常驻 matcher，对后加载类同样生效 */
+    /** 注册一批类的 watch（每个类一次链式注册，方法逐个 onBehavior 链上）；先按排除清单过滤类与方法 */
     private int registerBatch(Map<String, List<String>> classMethods, KillAdviceListener listener,
-                             ErrorRecordDao errorRecordDao, List<Long> unitIds) {
+                             ErrorRecordDao errorRecordDao, List<Long> unitIds,
+                             List<String> excludeClassRegex, List<String> excludeMethodRegex) {
+        java.util.regex.Pattern[] excludeClass = compilePatterns(excludeClassRegex);
+        java.util.regex.Pattern[] excludeMethod = compilePatterns(excludeMethodRegex);
         int registered = 0;
+        int excluded = 0;
         for (Map.Entry<String, List<String>> entry : classMethods.entrySet()) {
+            String className = entry.getKey();
+            if (matchesAny(excludeClass, className)) {
+                FaultLogger.info("class excluded by exclude.classes, skip: " + className);
+                excluded++;
+                continue;
+            }
+            List<String> kept = new ArrayList<>();
+            for (String name : entry.getValue()) {
+                if (!matchesAny(excludeMethod, className + "." + name)) {
+                    kept.add(name);
+                }
+            }
+            if (kept.isEmpty()) {
+                FaultLogger.info("all methods excluded by exclude.methods, skip class: " + className);
+                excluded++;
+                continue;
+            }
             try {
-                List<String> methodNames = entry.getValue();
+                List<String> methodNames = kept;
                 EventWatchBuilder.IBuildingForBehavior building = new EventWatchBuilder(moduleEventWatcher)
                         .onClass(entry.getKey())
                         .onBehavior(methodNames.get(0));
@@ -158,7 +180,31 @@ public class FaultKillModule implements Module {
                         stackOf(t), unitIds);
             }
         }
+        if (excluded > 0) {
+            FaultLogger.info("excluded classes/methods batches: " + excluded);
+        }
         return registered;
+    }
+
+    private static java.util.regex.Pattern[] compilePatterns(List<String> regexes) {
+        List<java.util.regex.Pattern> out = new ArrayList<>();
+        for (String r : regexes) {
+            try {
+                out.add(java.util.regex.Pattern.compile(r));
+            } catch (Throwable t) {
+                FaultLogger.warn("invalid exclude regex \"" + r + "\", skipped: " + t.getMessage());
+            }
+        }
+        return out.toArray(new java.util.regex.Pattern[0]);
+    }
+
+    private static boolean matchesAny(java.util.regex.Pattern[] patterns, String value) {
+        for (java.util.regex.Pattern p : patterns) {
+            if (p.matcher(value).matches()) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /** 表4 留痕：写失败仅告警（DB 可能正是不可用的一方） */

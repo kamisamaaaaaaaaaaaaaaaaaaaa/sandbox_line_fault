@@ -124,14 +124,39 @@ public final class FaultConfig {
         return get("sandbox.home", "/home/lys2/sandbox");
     }
 
-    /** premain 全程总预算：解析 + 落库 + 挂载 */
-    public long premainTimeoutMs() {
-        return getLong("premain.timeout.ms", 600000L);
+    /** 解析阶段超时（定位后的解析+落库，含异机 pending 等待） */
+    public long parseTimeoutMs() {
+        return getLong("parse.timeout.ms", 600000L);
+    }
+
+    /** 挂载阶段超时（sandbox.sh attach + 模块 inject + watch 注册） */
+    public long mountTimeoutMs() {
+        return getLong("mount.timeout.ms", 60000L);
     }
 
     /** 异机 pending 孤儿判定阈值（分钟） */
     public int orphanThresholdMinutes() {
         return getInt("orphan.threshold.minutes", 10);
+    }
+
+    /** 注入排除：类名正则（对完全限定类名全串匹配），命中的类整类不注入 */
+    public List<String> excludeClasses() {
+        return splitList("exclude.classes");
+    }
+
+    /** 注入排除：方法正则（对 "完全限定类名.方法名" 全串匹配），命中的方法不注入 */
+    public List<String> excludeMethods() {
+        return splitList("exclude.methods");
+    }
+
+    private List<String> splitList(String key) {
+        List<String> out = new ArrayList<>();
+        for (String s : get(key, "").split(",")) {
+            if (!s.trim().isEmpty()) {
+                out.add(s.trim());
+            }
+        }
+        return out;
     }
 
     /** 日志目录（相对路径基于目标进程工作目录） */

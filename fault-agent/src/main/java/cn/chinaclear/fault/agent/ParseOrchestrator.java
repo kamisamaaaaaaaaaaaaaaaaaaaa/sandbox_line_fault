@@ -64,7 +64,7 @@ final class ParseOrchestrator {
             // 首次解析：本节点负责
             unitId = newId;
             inFlight.add(unitId);
-            storeUnit(recordDao, methodDao, unit, unitId, bootJarPath);
+            storeUnit(config, recordDao, methodDao, unit, unitId, bootJarPath);
             removeInFlight(inFlight, unitId);
             return unitId;
         }
@@ -87,7 +87,7 @@ final class ParseOrchestrator {
             if (recordDao.claimForReparse(unitId, MachineInfo.hostname(), MachineInfo.ip())) {
                 FaultLogger.info("re-parse claimed (previous FAILED): unitId=" + unitId + " source=" + unit.sourceJar);
                 inFlight.add(unitId);
-                storeUnit(recordDao, methodDao, unit, unitId, bootJarPath);
+                storeUnit(config, recordDao, methodDao, unit, unitId, bootJarPath);
                 removeInFlight(inFlight, unitId);
             } else {
                 FaultLogger.info("re-parse claimed by other node first, skip: unitId=" + unitId);
@@ -105,7 +105,7 @@ final class ParseOrchestrator {
             if (recordDao.claimForReparse(unitId, MachineInfo.hostname(), MachineInfo.ip())) {
                 FaultLogger.info("re-parse claimed (" + reason + "): unitId=" + unitId + " source=" + unit.sourceJar);
                 inFlight.add(unitId);
-                storeUnit(recordDao, methodDao, unit, unitId, bootJarPath);
+                storeUnit(config, recordDao, methodDao, unit, unitId, bootJarPath);
                 removeInFlight(inFlight, unitId);
             } else {
                 FaultLogger.info("claim lost to other node (" + reason + "), skip: unitId=" + unitId);
@@ -134,7 +134,7 @@ final class ParseOrchestrator {
                     && recordDao.claimForReparse(unitId, MachineInfo.hostname(), MachineInfo.ip())) {
                 // 对方解析失败置了 failed，本节点接手
                 inFlight.add(unitId);
-                storeUnit(recordDao, methodDao, unit, unitId, bootJarPath);
+                storeUnit(config, recordDao, methodDao, unit, unitId, bootJarPath);
                 removeInFlight(inFlight, unitId);
                 break;
             }
@@ -144,7 +144,7 @@ final class ParseOrchestrator {
                     >= (long) config.orphanThresholdMinutes() * 60000L
                     && recordDao.claimForReparse(unitId, MachineInfo.hostname(), MachineInfo.ip())) {
                 inFlight.add(unitId);
-                storeUnit(recordDao, methodDao, unit, unitId, bootJarPath);
+                storeUnit(config, recordDao, methodDao, unit, unitId, bootJarPath);
                 removeInFlight(inFlight, unitId);
                 break;
             }
@@ -153,7 +153,7 @@ final class ParseOrchestrator {
     }
 
     /** 落库：表2 幂等批量插入 → 表1 置 completed；异常抛硬保护（携带该单元 id） */
-    private static void storeUnit(JarRecordDao recordDao, ClassMethodDao methodDao,
+    private static void storeUnit(FaultConfig config, JarRecordDao recordDao, ClassMethodDao methodDao,
                                   BootJarParser.ParseUnit unit, long unitId, String bootJarPath) {
         try {
             methodDao.batchInsertIgnore(unitId, unit.methods);

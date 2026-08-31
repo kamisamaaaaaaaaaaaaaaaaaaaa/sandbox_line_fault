@@ -32,8 +32,9 @@ public final class FaultAgent {
         FaultConfig config = FaultConfig.load(agentArgs);
         FaultLogger.init(config.logDir(), "fault-agent.log");
         long pid = currentPid();
-        long deadline = System.currentTimeMillis() + config.premainTimeoutMs();
-        FaultLogger.info("premain start: pid=" + pid + ", budget=" + config.premainTimeoutMs() + "ms"
+        long parseDeadline = System.currentTimeMillis() + config.parseTimeoutMs();
+        FaultLogger.info("premain start: pid=" + pid + ", parseTimeout=" + config.parseTimeoutMs()
+                + "ms, mountTimeout=" + config.mountTimeoutMs() + "ms"
                 + ", machine=" + MachineInfo.hostname() + "/" + MachineInfo.ip());
         try {
             String bootJar = BootJarLocator.locate();
@@ -47,13 +48,15 @@ public final class FaultAgent {
                 throw HardProtectException.exception("DB", "schema check failed: " + e.getMessage(),
                         stackOf(e), null, bootJar);
             }
-            List<Long> unitIds = ParseOrchestrator.parseAndStore(config, bootJar, deadline);
+            List<Long> unitIds = ParseOrchestrator.parseAndStore(config, bootJar, parseDeadline);
             if (!config.mountEnabled()) {
                 FaultLogger.info("mount.enabled=false -> parse-only mode (results in DB), "
                         + "release application startup without fault injection");
                 return;
             }
-            SandboxMountInvoker.mountSync(config, pid, unitIds, bootJar, deadline);
+            // 挂载阶段独立计时（mount.timeout.ms）
+            long mountDeadline = System.currentTimeMillis() + config.mountTimeoutMs();
+            SandboxMountInvoker.mountSync(config, pid, unitIds, bootJar, mountDeadline);
             FaultLogger.info("premain completed: mount OK, release application startup");
         } catch (HardProtectException e) {
             hardProtect(config, e);
