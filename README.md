@@ -140,6 +140,74 @@ java -Dfault.tag=round-001 \
 | 全量行 hook 有性能开销 | 仅本轮未命中行存在；已命中/已抢占行有内存短路 |
 | 基于 JVM-Sandbox 1.4.0 | 无 `withLoad()`；watcher 常驻 matcher 对后加载类天然生效 |
 
-## 八、卸载
+## 八、异常处理路径全景
+
+**总原则**：除 `mount.enabled=false`（纯解析模式）外，**任何阶段异常都不放行**——尽力写 `t_error_record`（表4）后 kill 当前进程；唯一例外是运行期 `beforeLine` 内不允许破坏业务方法（见 D 组）。
+
+### A 组：agent 侧 `premain`（阶段顺序 = 启动顺序）
+
+| # | 阶段 | 异常场景 | 处理 | 表1 影响 | 进程 |
+|---|---|---|---|---|---|
+| A0 | 日志初始化 | 目录不可写 | 降级仅 stdout，**不中断** | — | 继续 |
+| A1 | 配置加载 | `config.yml` 缺失/非法 | warn + 用内置默认值 | — | 继续 |
+| A1 | 配置加载 | 必填项缺失（`jdbc.username/password`） | 首次用库时抛 `IllegalStateException` → 硬保护 | 无 | kill |
+| A2 | bootJar 定位 | 三级兜底（sun.java.command → /proc/self/cmdline → inputArguments）全部失败 | 硬保护 `PARSE` | 无（尚未有单元） | kill |
+| A3 | 建表校验 | 库连不上 / 缺表 | 硬保护 `DB` | 无 | kill |
+| A4 | 解析 bootJar | zip 打不开/损坏 | 硬保护 `PARSE` | 无 | kill |
+| A4 | 解析 class | 单个 class ASM 失败 | 跳过该类，记入 `failedClasses`，**不中断** | 无 | 继续 |
+| A4 | 解析 class | 上述失败类落表4 | 单条写失败仅 warn | 无 | 继续 |
+| A5 | 表1 抢占 | `INSERT IGNORE` 冲突后查不到记录 | 硬保护 `DB` | 无 | kill |
+| A5 | 状态=completed | 已解析过 | 跳过复用 | 不变 | 继续 |
+| A5 | 状态=failed | `claimForReparse` 抢占失败（他节点先接手） | 跳过，**放行** | 不变 | 继续 |
+| A5 | 状态=pending（本机遗留：同 ip + 同 bootJar） | 上次本节点中断 | 立即接管重解析 | pending→completed | 继续 |
+| A5 | 状态=pending（异机且超孤儿阈值） | 他节点解析中断 | 抢占后接管重解析 | pending→completed | 继续 |
+| A5 | 状态=pending（异机未超时） | 他节点解析中 | 每秒轮询等待；对方 completed/failed 或变孤儿则接手 | 不变 | 继续 |
+| A5 | 轮询等待 | 超过 `parse.timeout.ms` | 硬保护 `PARSE/TIMEOUT`（携带解析中单元） | 解析中单元→failed | kill |
+| A5 | 轮询等待 | 记录消失 / 线程被中断 | 硬保护 `DB` / `PARSE` | 解析中单元→failed | kill |
+| A6 | 表2 落库 + 置 completed | 批量插入或更新失败 | 硬保护 `DB`（携带该单元 id） | 该单元→failed | kill |
+| A7 | 挂载 | 剩余时间 ≤ 0 / `sandbox.sh` 等待超时 | `destroyForcibly` + 硬保护 `MOUNT/TIMEOUT`（**unitIds=null**） | **不动**（解析结果有效可复用） | kill |
+| A7 | 挂载 | 非 0 退出码 / 脚本不存在 / 被中断 | 硬保护 `MOUNT` | **不动** | kill |
+| A8 | 硬保护收尾 | 表4 写失败（DB 正不可用） | 仅本地日志 | — | 仍 kill |
+| A8 | 硬保护收尾 | `kill -9` 未生效 | `Runtime.halt(137)` 兜底 | — | 终止 |
+
+### B 组：module 侧 `inject` 命令
+
+| # | 场景 | 处理 | 进程 |
+|---|---|---|---|
+| B1 | 缺 `-Dfault.tag` | 表4（`phase=MOUNT`，尽力）→ kill | kill |
+| B2 | `id` 参数空/非法 | 表4（`phase=INJECT`，尽力）→ kill | kill |
+| B3 | 重复 inject（同 unitIds 已注入） | 跳过，防重复注册 watch | 继续 |
+| B4 | 读表2 / 建连接失败 | 表4（尽力）→ kill | kill |
+| B5 | **单类 watch 注册失败** | 表4 留痕，**继续注册其他类**（不 kill） | 继续 |
+| B6 | 全部批次读完 `totalMethods == 0` | 表4 + kill（挂了却没方法 = 绝不放行） | kill |
+
+### C 组：运行期 `beforeLine`（每行回调）
+
+| # | 场景 | 处理 | 业务方法 |
+|---|---|---|---|
+| C1 | 类名不在本批映射 | 直接返回 | 正常执行 |
+| C2 | 该行本轮已确认被抢占（本地缓存） | 直接返回（不撞库） | 正常执行 |
+| C3 | `INSERT IGNORE` 成功 = 赢得本行本轮执行权 | 日志 → `kill -9` 自己 | **进程终止** |
+| C4 | `kill` 命令未生效 | 表4 留痕 + **回滚删除表3 记录**（防脏数据永久阻塞该行） + 移出缓存 | 放行继续 |
+| C5 | `INSERT IGNORE` 冲突 = 集群内他节点已触发该行 | 加入本地缓存 | 放行继续 |
+| C6 | 任何异常（含 DB 不可用） | 表4（尽力）→ **放行**，绝不破坏业务方法 | 正常执行 |
+
+### D 组：状态影响矩阵
+
+| 结果 | 表1 | 表3 | 表4 | 进程 |
+|---|---|---|---|---|
+| 解析成功 | completed | — | 仅失败 class 明细 | 继续 |
+| 解析中途失败/超时 | 该单元 failed | — | 有 | kill |
+| 定位/建表/配置失败 | 无记录 | — | 有 | kill |
+| 挂载失败/超时 | **保持 completed** | — | 有 | kill |
+| 命中故障 | — | 1 行（唯一索引保证集群唯一） | — | kill |
+| 同轮他节点已命中 | — | 无（冲突忽略） | — | 放行 |
+
+### 需要你确认的两处取舍
+
+1. **运行期 DB 不可用 → 故障静默跳过**（C6）：为保证业务方法不被回调拖垮，DB 异常时放行业务执行，代价是该行本轮可能漏注入。若你的演练要求"宁可杀进程也不能漏"，可改为 kill。
+2. **单类注册失败不 kill**（B5）：部分类注册失败时进程继续运行，故障覆盖不完整（表4 有留痕）。若要求"覆盖不完整即不放行"，可加开关改为 kill。
+
+## 九、卸载
 
 演练结束：从启动命令移除 `-javaagent` 参数与 `-Dfault.tag`，重启应用即恢复原状（模块 jar 可留在 sandbox-module 目录，不影响未挂载的进程）。
