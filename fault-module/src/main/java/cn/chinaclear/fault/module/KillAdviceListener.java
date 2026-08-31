@@ -97,9 +97,13 @@ final class KillAdviceListener extends AdviceListener {
                         + "), release execution: " + lineKey);
             }
         } catch (Throwable t) {
-            // 任何异常：记表4 后放行该行，绝不破坏业务方法本身的执行
-            FaultLogger.error("beforeLine handling failed, release line execution: " + lineKey, t);
+            // 任何异常（含 DB 不可用）：记表4 后按硬保护 kill —— 故障工具宁可不放行，
+            // 也不能让一个"已注入但可能不生效"的进程继续运行
+            FaultLogger.error("beforeLine handling failed, kill process per policy: " + lineKey, t);
             recordError("beforeLine failed: " + t.getMessage(), lineKey, t);
+            if (!KillUtil.killCurrentProcess(pid)) {
+                Runtime.getRuntime().halt(137);
+            }
         }
     }
 

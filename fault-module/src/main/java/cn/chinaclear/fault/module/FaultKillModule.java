@@ -168,10 +168,11 @@ public class FaultKillModule implements Module {
                         .onWatch(listener);
                 registered++;
             } catch (Throwable t) {
-                // 单类注册失败不影响其他类，但必须落表4 留痕
+                // 单类注册失败 = 故障覆盖不完整，落表4 后抛出，由 inject 外层统一 kill
                 FaultLogger.error("register watch failed for class=" + entry.getKey(), t);
                 recordInjectError(errorRecordDao, "watch register failed for class=" + entry.getKey(),
                         stackOf(t), unitIds);
+                throw new IllegalStateException("watch register failed for class=" + entry.getKey(), t);
             }
         }
         if (excluded > 0) {

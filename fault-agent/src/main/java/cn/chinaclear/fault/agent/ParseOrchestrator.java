@@ -90,7 +90,10 @@ final class ParseOrchestrator {
                 storeUnit(config, recordDao, methodDao, unit, unitId, bootJarPath);
                 removeInFlight(inFlight, unitId);
             } else {
-                FaultLogger.info("re-parse claimed by other node first, skip: unitId=" + unitId);
+                // 抢占失败 = 他节点已抢先把状态改成 pending 并接手重解析：
+                // 必须等待其结果，否则本节点会带着不完整的方法清单去挂载
+                FaultLogger.info("re-parse claimed by other node first, waiting for its result: unitId=" + unitId);
+                waitForOtherNode(config, recordDao, methodDao, unit, unitId, bootJarPath, deadline, inFlight);
             }
             return unitId;
         }
@@ -114,6 +117,20 @@ final class ParseOrchestrator {
         }
 
         // 异机 pending 且未超时：其他节点解析中——轮询等待其完成（数据齐了才能保证本节点挂载覆盖完整）
+        waitForOtherNode(config, recordDao, methodDao, unit, unitId, bootJarPath, deadline, inFlight);
+        return unitId;
+    }
+
+    /**
+     * 等待他节点完成解析：轮询表1，出现以下情况之一才返回：
+     * ① 他节点 completed（数据可用）；② 他节点 failed 且本节点抢占成功并解析完成；
+     * ③ 他节点 pending 超过孤儿阈值且本节点抢占成功并解析完成。
+     * 超时/中断/记录消失 → 硬保护。
+     */
+    private static void waitForOtherNode(FaultConfig config, JarRecordDao recordDao, ClassMethodDao methodDao,
+                                         BootJarParser.ParseUnit unit, long unitId, String bootJarPath,
+                                         long deadline, List<Long> inFlight) {
+        FaultLogger.info("waiting for other node to finish parsing: unitId=" + unitId + " source=" + unit.sourceJar);
         while (true) {
             checkDeadline(deadline, bootJarPath, snapshot(inFlight));
             try {
@@ -128,7 +145,8 @@ final class ParseOrchestrator {
                         null, snapshot(inFlight), bootJarPath);
             }
             if ("completed".equals(latest.getStatus())) {
-                break;
+                FaultLogger.info("other node completed, proceed: unitId=" + unitId + " source=" + unit.sourceJar);
+                return;
             }
             if ("failed".equals(latest.getStatus())
                     && recordDao.claimForReparse(unitId, MachineInfo.hostname(), MachineInfo.ip())) {
@@ -136,7 +154,7 @@ final class ParseOrchestrator {
                 inFlight.add(unitId);
                 storeUnit(config, recordDao, methodDao, unit, unitId, bootJarPath);
                 removeInFlight(inFlight, unitId);
-                break;
+                return;
             }
             // 仍是 pending：若 updated_at 超过孤儿阈值则接手重解析
             if ("pending".equals(latest.getStatus())
@@ -146,10 +164,9 @@ final class ParseOrchestrator {
                 inFlight.add(unitId);
                 storeUnit(config, recordDao, methodDao, unit, unitId, bootJarPath);
                 removeInFlight(inFlight, unitId);
-                break;
+                return;
             }
         }
-        return unitId;
     }
 
     /** 落库：表2 幂等批量插入 → 表1 置 completed；异常抛硬保护（携带该单元 id） */

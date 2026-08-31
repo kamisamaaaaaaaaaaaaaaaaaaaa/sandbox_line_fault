@@ -34,10 +34,14 @@ public final class FaultConfig {
                     flatten("", rootMap, c.props);
                 }
             } else {
-                FaultLogger.warn(RESOURCE_NAME + " not found in classpath, use built-in defaults");
+                // 资源缺失 = 配置不可用（无库地址/账号），必须硬保护，不做"内置默认值"静默降级
+                throw new IllegalStateException(RESOURCE_NAME + " not found in classpath");
             }
         } catch (IOException e) {
-            FaultLogger.error("load " + RESOURCE_NAME + " failed", e);
+            throw new IllegalStateException("load " + RESOURCE_NAME + " failed: " + e.getMessage(), e);
+        } catch (RuntimeException e) {
+            // YAML 语法错误等（如双引号内写单个 \.）：配置非法，同样硬保护
+            throw new IllegalStateException("invalid " + RESOURCE_NAME + ": " + e.getMessage(), e);
         }
         if (agentArgs != null && !agentArgs.trim().isEmpty()) {
             for (String pair : agentArgs.split(",")) {

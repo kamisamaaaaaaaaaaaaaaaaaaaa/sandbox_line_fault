@@ -29,14 +29,16 @@ public final class FaultAgent {
     }
 
     public static void premain(String agentArgs, Instrumentation inst) {
-        FaultConfig config = FaultConfig.load(agentArgs);
-        FaultLogger.init(config.logDir(), "fault-agent.log");
+        // config 声明在 try 外：加载失败时仍要按硬保护 kill（此时没有 DB 配置，仅本地日志留痕）
+        FaultConfig config = null;
         long pid = currentPid();
-        long parseDeadline = System.currentTimeMillis() + config.parseTimeoutMs();
-        FaultLogger.info("premain start: pid=" + pid + ", parseTimeout=" + config.parseTimeoutMs()
-                + "ms, mountTimeout=" + config.mountTimeoutMs() + "ms"
-                + ", machine=" + MachineInfo.hostname() + "/" + MachineInfo.ip());
         try {
+            config = FaultConfig.load(agentArgs);
+            FaultLogger.init(config.logDir(), "fault-agent.log");
+            long parseDeadline = System.currentTimeMillis() + config.parseTimeoutMs();
+            FaultLogger.info("premain start: pid=" + pid + ", parseTimeout=" + config.parseTimeoutMs()
+                    + "ms, mountTimeout=" + config.mountTimeoutMs() + "ms"
+                    + ", machine=" + MachineInfo.hostname() + "/" + MachineInfo.ip());
             String bootJar = BootJarLocator.locate();
             if (bootJar == null) {
                 throw HardProtectException.exception("PARSE",
@@ -70,6 +72,13 @@ public final class FaultAgent {
     private static void hardProtect(FaultConfig config, HardProtectException e) {
         FaultLogger.error("HARD PROTECT: phase=" + e.phase + ", type=" + e.errorType
                 + ", msg=" + e.getMessage() + ", unitIds=" + e.unitIds, e);
+        if (config == null) {
+            FaultLogger.error("config unavailable (missing/invalid), skip DB records (local log only)");
+            if (!KillUtil.killCurrentProcess(currentPid())) {
+                Runtime.getRuntime().halt(137);
+            }
+            return;
+        }
         try {
             JdbcHelper db = new JdbcHelper(config.jdbcUrl(), config.jdbcUsername(), config.jdbcPassword());
             JarRecordDao recordDao = new JarRecordDao(db);

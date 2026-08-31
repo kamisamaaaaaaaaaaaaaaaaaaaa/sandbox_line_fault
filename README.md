@@ -142,23 +142,30 @@ java -Dfault.tag=round-001 \
 
 ## 八、异常处理路径全景
 
-**总原则**：除 `mount.enabled=false`（纯解析模式）外，**任何阶段异常都不放行**——尽力写 `t_error_record`（表4）后 kill 当前进程；唯一例外是运行期 `beforeLine` 内不允许破坏业务方法（见 D 组）。
+**总原则**：除 `mount.enabled=false`（纯解析模式）外，**任何阶段异常都不放行**——尽力写 `t_error_record`（表4）后 kill 当前进程。
+配置缺失/非法时连库都不可用，此时表4 无法写入，仅本地日志（stdout / `app.log`）留痕后 kill。
+
+**名词约定**：
+- **配置缺失** = classpath 里根本没有 `config.yml`（不是"必填项没填"，那是另一行）；
+- **配置非法** = `config.yml` 存在但 YAML 语法错误（典型：双引号里写单个 `\.`）；
+- 两者都直接硬保护，不做"用内置默认值静默降级"。
 
 ### A 组：agent 侧 `premain`（阶段顺序 = 启动顺序）
 
 | # | 阶段 | 异常场景 | 处理 | 表1 影响 | 进程 |
 |---|---|---|---|---|---|
 | A0 | 日志初始化 | 目录不可写 | 降级仅 stdout，**不中断** | — | 继续 |
-| A1 | 配置加载 | `config.yml` 缺失/非法 | warn + 用内置默认值 | — | 继续 |
-| A1 | 配置加载 | 必填项缺失（`jdbc.username/password`） | 首次用库时抛 `IllegalStateException` → 硬保护 | 无 | kill |
+| A1 | 配置加载 | `config.yml` **缺失** | 硬保护 `PARSE`（无配置信息，表4 写不了 → 本地日志） | 无 | kill |
+| A1 | 配置加载 | `config.yml` **非法**（YAML 语法错） | 硬保护 `PARSE`（同上） | 无 | kill |
+| A1 | 配置加载 | 必填项缺失（`jdbc.username/password`） | 首次用库时 `require` 抛错 → 硬保护 `DB` | 无 | kill |
 | A2 | bootJar 定位 | 三级兜底（sun.java.command → /proc/self/cmdline → inputArguments）全部失败 | 硬保护 `PARSE` | 无（尚未有单元） | kill |
 | A3 | 建表校验 | 库连不上 / 缺表 | 硬保护 `DB` | 无 | kill |
 | A4 | 解析 bootJar | zip 打不开/损坏 | 硬保护 `PARSE` | 无 | kill |
 | A4 | 解析 class | 单个 class ASM 失败 | 跳过该类，记入 `failedClasses`，**不中断** | 无 | 继续 |
 | A4 | 解析 class | 上述失败类落表4 | 单条写失败仅 warn | 无 | 继续 |
-| A5 | 表1 抢占 | `INSERT IGNORE` 冲突后查不到记录 | 硬保护 `DB` | 无 | kill |
+| A5 | 表1 抢占 | `INSERT IGNORE` 冲突（说明 sha256 已存在）但紧接着 `findBySha256` 查不到行 = 数据不一致 | 硬保护 `DB` | 无 | kill |
 | A5 | 状态=completed | 已解析过 | 跳过复用 | 不变 | 继续 |
-| A5 | 状态=failed | `claimForReparse` 抢占失败（他节点先接手） | 跳过，**放行** | 不变 | 继续 |
+| A5 | 状态=failed | `claimForReparse` 抢占失败（他节点刚把状态改成 pending 并接手） | **等待他节点完成**（completed / 再次 failed 抢占 / 变孤儿抢占） | 不变 | 继续 |
 | A5 | 状态=pending（本机遗留：同 ip + 同 bootJar） | 上次本节点中断 | 立即接管重解析 | pending→completed | 继续 |
 | A5 | 状态=pending（异机且超孤儿阈值） | 他节点解析中断 | 抢占后接管重解析 | pending→completed | 继续 |
 | A5 | 状态=pending（异机未超时） | 他节点解析中 | 每秒轮询等待；对方 completed/failed 或变孤儿则接手 | 不变 | 继续 |
@@ -178,8 +185,8 @@ java -Dfault.tag=round-001 \
 | B2 | `id` 参数空/非法 | 表4（`phase=INJECT`，尽力）→ kill | kill |
 | B3 | 重复 inject（同 unitIds 已注入） | 跳过，防重复注册 watch | 继续 |
 | B4 | 读表2 / 建连接失败 | 表4（尽力）→ kill | kill |
-| B5 | **单类 watch 注册失败** | 表4 留痕，**继续注册其他类**（不 kill） | 继续 |
-| B6 | 全部批次读完 `totalMethods == 0` | 表4 + kill（挂了却没方法 = 绝不放行） | kill |
+| B5 | **单类 watch 注册失败** | 表4 留痕 → 抛出，外层统一 kill（覆盖不完整即不放行） | kill |
+| B6 | 全部批次读完 `totalMethods == 0`（表2 里这些 unitId 查不到任何方法：解析单元内无 class / 数据被误删 / id 传错） | 表4 + kill（挂了却没方法 = 绝不放行） | kill |
 
 ### C 组：运行期 `beforeLine`（每行回调）
 
@@ -190,7 +197,7 @@ java -Dfault.tag=round-001 \
 | C3 | `INSERT IGNORE` 成功 = 赢得本行本轮执行权 | 日志 → `kill -9` 自己 | **进程终止** |
 | C4 | `kill` 命令未生效 | 表4 留痕 + **回滚删除表3 记录**（防脏数据永久阻塞该行） + 移出缓存 | 放行继续 |
 | C5 | `INSERT IGNORE` 冲突 = 集群内他节点已触发该行 | 加入本地缓存 | 放行继续 |
-| C6 | 任何异常（含 DB 不可用） | 表4（尽力）→ **放行**，绝不破坏业务方法 | 正常执行 |
+| C6 | 任何异常（含 DB 不可用） | 表4（尽力）→ **kill**（宁可不放行，也不放过"已注入却不生效"的进程）；kill 未生效则 `halt(137)` | **进程终止** |
 
 ### D 组：状态影响矩阵
 
@@ -203,10 +210,10 @@ java -Dfault.tag=round-001 \
 | 命中故障 | — | 1 行（唯一索引保证集群唯一） | — | kill |
 | 同轮他节点已命中 | — | 无（冲突忽略） | — | 放行 |
 
-### 需要你确认的两处取舍
+### 已按"不放行"策略固化的两处（原为放行，现改为 kill）
 
-1. **运行期 DB 不可用 → 故障静默跳过**（C6）：为保证业务方法不被回调拖垮，DB 异常时放行业务执行，代价是该行本轮可能漏注入。若你的演练要求"宁可杀进程也不能漏"，可改为 kill。
-2. **单类注册失败不 kill**（B5）：部分类注册失败时进程继续运行，故障覆盖不完整（表4 有留痕）。若要求"覆盖不完整即不放行"，可加开关改为 kill。
+1. **运行期 `beforeLine` 任何异常（含 DB 不可用）→ kill**（C6）：宁可杀进程，也不放过"已注入却可能不生效"的进程；kill 未生效则 `halt(137)`。
+2. **单类 watch 注册失败 → kill**（B5）：故障覆盖不完整即不放行（表4 留痕后由 `inject` 外层统一 kill）。
 
 ## 九、卸载
 
