@@ -1,0 +1,6 @@
+# fault-module 配置（sandbox 模块侧连库：读表1/表2、写表3/表4）
+# jdbc.host 指向 Windows 宿主机，MySQL 在 Windows 便携部署
+jdbc:
+  host: 192.168.193.1
+  username: root
+  password: root123

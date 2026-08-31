@@ -24,6 +24,7 @@ shadowJar {
     relocate 'com.google.protobuf', 'cn.chinaclear.fault.shaded.protobuf'
     relocate 'org.objectweb.asm', 'cn.chinaclear.fault.shaded.asm'
     relocate 'com.google.common', 'cn.chinaclear.fault.shaded.guava'
+    relocate 'org.yaml.snakeyaml', 'cn.chinaclear.fault.shaded.snakeyaml'
 }
 
 build.dependsOn shadowJar

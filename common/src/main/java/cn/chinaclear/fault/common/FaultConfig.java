@@ -1,18 +1,21 @@
 package cn.chinaclear.fault.common;
 
+import org.yaml.snakeyaml.Yaml;
+
 import java.io.IOException;
 import java.io.InputStream;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Properties;
 
 /**
- * 配置加载：classpath 下 config.properties 为基线，agentArgs 键值对覆盖（仅 agent 侧使用）。
- * agentArgs 形如：-javaagent:fault-agent.jar=k1=v1,k2=v2
+ * 配置加载：classpath 下 config.yml（YAML，支持嵌套分组）为基线，展平为点分键，
+ * agentArgs 键值对覆盖（仅 agent 侧使用，形如 -javaagent:fault-agent.jar=k1=v1,k2=v2）。
  */
 public final class FaultConfig {
 
-    public static final String RESOURCE_NAME = "config.properties";
+    public static final String RESOURCE_NAME = "config.yml";
 
     private final Properties props = new Properties();
 
@@ -23,12 +26,18 @@ public final class FaultConfig {
         FaultConfig c = new FaultConfig();
         try (InputStream in = FaultConfig.class.getClassLoader().getResourceAsStream(RESOURCE_NAME)) {
             if (in != null) {
-                c.props.load(in);
+                Yaml yaml = new Yaml();
+                Object root = yaml.load(in);
+                if (root instanceof Map) {
+                    @SuppressWarnings("unchecked")
+                    Map<String, Object> rootMap = (Map<String, Object>) root;
+                    flatten("", rootMap, c.props);
+                }
             } else {
-                FaultLogger.warn("config.properties not found in classpath, use built-in defaults");
+                FaultLogger.warn(RESOURCE_NAME + " not found in classpath, use built-in defaults");
             }
         } catch (IOException e) {
-            FaultLogger.error("load config.properties failed", e);
+            FaultLogger.error("load " + RESOURCE_NAME + " failed", e);
         }
         if (agentArgs != null && !agentArgs.trim().isEmpty()) {
             for (String pair : agentArgs.split(",")) {
@@ -40,6 +49,20 @@ public final class FaultConfig {
             }
         }
         return c;
+    }
+
+    /** 嵌套 Map 展平为点分键：jdbc.host=... */
+    @SuppressWarnings("unchecked")
+    private static void flatten(String prefix, Map<String, Object> src, Properties out) {
+        for (Map.Entry<String, Object> e : src.entrySet()) {
+            String key = prefix.isEmpty() ? e.getKey() : prefix + "." + e.getKey();
+            Object value = e.getValue();
+            if (value instanceof Map) {
+                flatten(key, (Map<String, Object>) value, out);
+            } else if (value != null) {
+                out.setProperty(key, String.valueOf(value));
+            }
+        }
     }
 
     public String get(String key, String def) {

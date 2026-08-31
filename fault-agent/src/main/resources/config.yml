@@ -1,0 +1,31 @@
+# fault-agent 配置（YAML，可被 -javaagent:fault-agent.jar=k1=v1,k2=v2 覆盖）
+# 应用必须以 -jar 方式启动（bootJar 自动从启动参数定位）
+
+jdbc:
+  # MySQL 地址（跨机部署填 MySQL 所在机器 IP）
+  host: 192.168.193.1
+  username: root
+  password: root123
+
+lib:
+  # BOOT-INF/lib 第三方白名单：需解析的业务 jar 文件名，逗号分隔多个（支持前缀匹配）
+  # 留空 = 不解析任何 lib
+  whitelist: test-lib
+
+mount:
+  # 是否挂载故障模块：true=解析后自动挂载并注入故障；false=纯解析模式（只落库，应用正常启动不注入）
+  enabled: true
+
+sandbox:
+  # sandbox 工具安装目录（挂载脚本位于其 bin/sandbox.sh）
+  home: /home/lys/sandbox
+
+premain:
+  # premain 全程总预算（解析+落库+挂载），毫秒
+  timeout:
+    ms: 600000
+
+orphan:
+  # 异机 pending 孤儿判定阈值（分钟）
+  threshold:
+    minutes: 10
