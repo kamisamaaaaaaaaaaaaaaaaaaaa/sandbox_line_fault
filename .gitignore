@@ -7,3 +7,5 @@ build/
 logs/
 *.log
 .run/
+.codebuddy/
+compile-out.txt

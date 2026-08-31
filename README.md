@@ -1,7 +1,7 @@
 # fault-sandbox 使用手册
 
 > 基于 JVM-Sandbox 的进程级故障注入工具：目标应用启动时自动解析用户类与方法并挂载故障模块，**任意用户代码行首次执行到时，记录故障（机器/类/方法/行/线程）并 kill 掉当前进程**。
-> 设计原理与难题解决见 [DESIGN.md](DESIGN.md)，验证记录见 [tests/TEST_CASES.md](tests/TEST_CASES.md)。
+> 设计原理与难题解决见 [DESIGN.md](DESIGN.md)，验证记录见 [TEST_CASES.md](TEST_CASES.md)。
 
 ## 一、快速开始（三步）
 
@@ -213,3 +213,38 @@ java -Dfault.tag=round-001 \
 ## 九、卸载
 
 演练结束：从启动命令移除 `-javaagent` 参数与 `-Dfault.tag`，重启应用即恢复原状（模块 jar 可留在 sandbox-module 目录，不影响未挂载的进程）。
+
+## 十、编译与构建
+
+**环境**：JDK 8+ 即可（Gradle Wrapper 已随仓库提供，无需本机安装 Gradle）；编译产物为 Java 8 字节码。仓库结构：
+
+| 模块 | 内容 |
+|---|---|
+| `common` | 公共代码：解析器、JDBC/DAO、配置、日志、kill 工具、`schema.sql` |
+| `fault-agent` | **agent**（premain 定位/解析/落库/挂载），fat jar 内 mysql-connector/ASM 等已 shadow relocate 到 `cn.chinaclear.fault.shaded.*`，避免与应用依赖冲突 |
+| `fault-module` | **sandbox 模块**（inject 命令 + 行级监听），运行在 sandbox 独立 classloader，无需 relocate |
+| `test-app` / `test-lib` | 验证用 Spring Boot 应用与白名单 lib（非部署产物） |
+
+```bash
+# Windows（项目根目录）
+gradlew.bat :fault-agent:shadowJar :fault-module:shadowJar
+
+# Linux
+./gradlew :fault-agent:shadowJar :fault-module:shadowJar
+```
+
+产物位置（部署的就是这两个）：
+
+| 产物 | 路径 | 去向 |
+|---|---|---|
+| agent | `fault-agent/build/libs/fault-agent-1.0.0.jar` | 任意目录，`-javaagent` 引用 |
+| module | `fault-module/build/libs/fault-module-1.0.0.jar` | `<sandbox安装目录>/sandbox-module/` |
+
+附：`gradlew.bat build` 编译全部模块（含 test-app/test-lib 的 bootJar，验证用）。
+
+**注意事项**：
+
+- 配置内置于各自 fat jar（`fault-agent/src/main/resources/config.yml`、`fault-module/src/main/resources/config.yml`），**修改配置后需重新打包**；
+- 改 `common` 模块后，agent 与 module 两个包都要重打；
+- 改了 `config.yml` 后若 gradle 判 `UP-TO-DATE` 未重新打包，加 `--rerun-tasks` 强制重跑；
+- 数据库表结构以 `common/src/main/resources/schema.sql` 为准，改表结构需同步该文件并在所有环境重跑。

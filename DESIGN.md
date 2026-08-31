@@ -1,6 +1,6 @@
 # fault-sandbox 设计文档
 
-> 本文描述系统的设计思路、关键难题与解决方案。使用说明见 [README.md](README.md)，验证记录见 [tests/TEST_CASES.md](tests/TEST_CASES.md)。
+> 本文描述系统的设计思路、关键难题与解决方案。使用说明见 [README.md](README.md)，验证记录见 [TEST_CASES.md](TEST_CASES.md)。
 
 ## 1. 背景与目标
 
@@ -137,4 +137,4 @@ sandbox 1.4.0 的 `EventWatchBuilder` 没有 `withLoad()`（更高版本 API）�
 
 ## 5. 已验证场景
 
-TC1-TC8（解析/跳过/命中/续抢/多节点/续传/硬保护/配置）与 V1-V4（tag 机制/lambda 命中）全部通过，明细见 `tests/TEST_CASES.md`。并发抢占的数据库层原子性单独用 5 路并行 `INSERT IGNORE` 实测（仅 1 条成功）。
+TC1-TC8（解析/跳过/命中/续抢/多节点/续传/硬保护/配置）与 V1-V4（tag 机制/lambda 命中）全部通过，明细见 `TEST_CASES.md`。并发抢占的数据库层原子性单独用 5 路并行 `INSERT IGNORE` 实测（仅 1 条成功）。
