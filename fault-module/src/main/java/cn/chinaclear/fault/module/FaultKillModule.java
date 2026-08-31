@@ -104,7 +104,7 @@ public class FaultKillModule implements Module {
                 KillAdviceListener listener =
                         new KillAdviceListener(faultRecordDao, errorRecordDao, classToUnitId, pid, tag);
                 registered += registerBatch(classMethods, listener, errorRecordDao, unitIds,
-                        config.excludeClasses(), config.excludeMethods());
+                        config.excludeMethods());
                 FaultLogger.info("batch registered: methods=" + batch.size()
                         + " classes=" + classMethods.size() + " lastId=" + lastId);
             }
@@ -135,21 +135,15 @@ public class FaultKillModule implements Module {
         }
     }
 
-    /** 注册一批类的 watch（每个类一次链式注册，方法逐个 onBehavior 链上）；先按排除清单过滤类与方法 */
+    /** 注册一批类的 watch（每个类一次链式注册，方法逐个 onBehavior 链上）；先按 exclude.methods 过滤 */
     private int registerBatch(Map<String, List<String>> classMethods, KillAdviceListener listener,
                              ErrorRecordDao errorRecordDao, List<Long> unitIds,
-                             List<String> excludeClassRegex, List<String> excludeMethodRegex) {
-        java.util.regex.Pattern[] excludeClass = compilePatterns(excludeClassRegex);
+                             List<String> excludeMethodRegex) {
         java.util.regex.Pattern[] excludeMethod = compilePatterns(excludeMethodRegex);
         int registered = 0;
         int excluded = 0;
         for (Map.Entry<String, List<String>> entry : classMethods.entrySet()) {
             String className = entry.getKey();
-            if (matchesAny(excludeClass, className)) {
-                FaultLogger.info("class excluded by exclude.classes, skip: " + className);
-                excluded++;
-                continue;
-            }
             List<String> kept = new ArrayList<>();
             for (String name : entry.getValue()) {
                 if (!matchesAny(excludeMethod, className + "." + name)) {

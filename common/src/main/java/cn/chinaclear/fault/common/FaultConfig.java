@@ -124,14 +124,14 @@ public final class FaultConfig {
         return get("sandbox.home", "/home/lys2/sandbox");
     }
 
-    /** 解析阶段超时（定位后的解析+落库，含异机 pending 等待） */
+    /** 解析阶段超时（定位后的解析+落库，含异机 pending 等待），默认 15 分钟 */
     public long parseTimeoutMs() {
-        return getLong("parse.timeout.ms", 600000L);
+        return getLong("parse.timeout.ms", 900000L);
     }
 
-    /** 挂载阶段超时（sandbox.sh attach + 模块 inject + watch 注册） */
+    /** 挂载阶段超时（sandbox.sh attach + 模块 inject + watch 注册），默认 20 分钟 */
     public long mountTimeoutMs() {
-        return getLong("mount.timeout.ms", 60000L);
+        return getLong("mount.timeout.ms", 1200000L);
     }
 
     /** 异机 pending 孤儿判定阈值（分钟） */
@@ -139,12 +139,10 @@ public final class FaultConfig {
         return getInt("orphan.threshold.minutes", 10);
     }
 
-    /** 注入排除：类名正则（对完全限定类名全串匹配），命中的类整类不注入 */
-    public List<String> excludeClasses() {
-        return splitList("exclude.classes");
-    }
-
-    /** 注入排除：方法正则（对 "完全限定类名.方法名" 全串匹配），命中的方法不注入 */
+    /**
+     * 注入排除：方法正则，对 "完全限定类名.方法名" 全串匹配，逗号分隔，命中的方法不注入。
+     * 排除某个类的所有方法写 "全限定类名\..*"，例如 cn\.demo\.OrderService\..*
+     */
     public List<String> excludeMethods() {
         return splitList("exclude.methods");
     }
