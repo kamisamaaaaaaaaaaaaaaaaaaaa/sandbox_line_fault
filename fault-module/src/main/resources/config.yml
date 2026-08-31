@@ -10,13 +10,14 @@ inject:
   batch:
     size: 5000
 
-exclude:
-  # 注入排除：方法正则，全串匹配 "完全限定类名.方法名"，一行一个（"- " 开头），命中的方法不注入
-  # 排除某个类的所有方法：- cn\.demo\.OrderService\..*
-  # 排除单个方法：- cn\.demo\.OrderService\.pay
-  # 正则中的 . 是通配符，表示字面量点请写 \.（不转义也能匹配，但会放宽，如 OrderService 会匹配 OrderXService）
-  # 空列表（methods: []）= 不排除任何方法
-  methods: []
+# 注入排除（不配置 exclude 段 = 不排除任何方法；需要时取消注释并按需增删）：
+# exclude:
+#   # 方法正则，全串匹配 "完全限定类名.方法名"，一行一个（"- " 开头），命中的方法不注入
+#   # 排除某个类的所有方法：- cn\.demo\.OrderService\..*
+#   # 排除单个方法：- cn\.demo\.OrderService\.pay
+#   # 正则中的 . 是通配符，表示字面量点请写 \.（不转义也能匹配，但会放宽，如 OrderService 会匹配 OrderXService）
+#   methods:
+#     - cn\.demo\.SafeService\..*
 
 log:
   # 模块日志目录（相对路径基于目标进程工作目录）

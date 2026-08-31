@@ -49,11 +49,18 @@ public final class FaultConfig {
                 int i = pair.indexOf('=');
                 if (i > 0) {
                     String k = pair.substring(0, i).trim();
-                    // 覆盖列表键时清除原列表条目（key.0/key.1/...），保证整体替换语义
+                    String value = pair.substring(i + 1).trim();
+                    // 列表键覆盖：清除原条目（key.0/key.1/...）后把覆盖值写入首条目，保证整体替换语义
+                    boolean wasList = false;
                     for (int j = 0; c.props.containsKey(k + "." + j); j++) {
                         c.props.remove(k + "." + j);
+                        wasList = true;
                     }
-                    c.props.setProperty(k, pair.substring(i + 1).trim());
+                    if (wasList) {
+                        c.props.setProperty(k + ".0", value);
+                    } else {
+                        c.props.setProperty(k, value);
+                    }
                 }
             }
         }
@@ -83,8 +90,8 @@ public final class FaultConfig {
     }
 
     /**
-     * 列表配置：优先读 YAML 列表形式（key.0、key.1...，对应 yml 里一行一个 "- " 条目）；
-     * 无列表条目时回退逗号分隔写法（也用于 agentArgs 覆盖传值）。
+     * 列表配置：只支持 YAML 列表形式（key.0、key.1...，对应 yml 里一行一个 "- " 条目）；
+     * 未配置该参数 = 空列表（不解析任何 lib / 不排除任何方法）。
      */
     public List<String> getList(String key) {
         List<String> out = new ArrayList<>();
@@ -99,10 +106,7 @@ public final class FaultConfig {
             }
             i++;
         }
-        if (!out.isEmpty()) {
-            return out;
-        }
-        return splitList(key);
+        return out;
     }
 
     public String get(String key, String def) {
@@ -179,16 +183,6 @@ public final class FaultConfig {
      */
     public List<String> excludeMethods() {
         return getList("exclude.methods");
-    }
-
-    private List<String> splitList(String key) {
-        List<String> out = new ArrayList<>();
-        for (String s : get(key, "").split(",")) {
-            if (!s.trim().isEmpty()) {
-                out.add(s.trim());
-            }
-        }
-        return out;
     }
 
     /** 日志目录（相对路径基于目标进程工作目录） */
