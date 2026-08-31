@@ -13,6 +13,7 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Enumeration;
 import java.util.List;
+import java.util.regex.Pattern;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipFile;
 import java.util.zip.ZipInputStream;
@@ -128,18 +129,22 @@ public final class BootJarParser {
         }
     }
 
-    /** 白名单匹配：精确文件名或前缀匹配 */
+    /** 白名单匹配：每项为正则表达式，对 jar 文件名全串匹配；非法正则跳过并告警 */
     static boolean matchesWhitelist(String jarName, List<String> whitelist) {
         if (whitelist == null) {
             return false;
         }
-        for (String w : whitelist) {
-            String t = w.trim();
+        for (String regex : whitelist) {
+            String t = regex.trim();
             if (t.isEmpty()) {
                 continue;
             }
-            if (jarName.equals(t) || jarName.startsWith(t)) {
-                return true;
+            try {
+                if (Pattern.compile(t).matcher(jarName).matches()) {
+                    return true;
+                }
+            } catch (Exception e) {
+                FaultLogger.warn("invalid whitelist regex \"" + t + "\", skipped: " + e.getMessage());
             }
         }
         return false;

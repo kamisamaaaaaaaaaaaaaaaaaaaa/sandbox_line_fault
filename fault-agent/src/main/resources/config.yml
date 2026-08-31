@@ -2,15 +2,16 @@
 # 应用必须以 -jar 方式启动（bootJar 自动从启动参数定位）
 
 jdbc:
-  # MySQL 地址（跨机部署填 MySQL 所在机器 IP）
-  host: 192.168.193.1
+  # 故障库连接串（必填）
+  url: jdbc:mysql://192.168.193.1:3306/fault_sandbox?useUnicode=true&characterEncoding=utf8&useSSL=false&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true&connectTimeout=5000&socketTimeout=10000
   username: root
   password: root123
 
 lib:
-  # BOOT-INF/lib 第三方白名单：需解析的业务 jar 文件名，逗号分隔多个（支持前缀匹配）
+  # BOOT-INF/lib 第三方白名单：正则表达式（对 jar 文件名全串匹配），逗号分隔多个
+  # 例：test-lib.*（前缀）、.*-common-.*\.jar（片段）、biz-dao-1\.0\.0\.jar（精确）
   # 留空 = 不解析任何 lib
-  whitelist: test-lib
+  whitelist: test-lib.*
 
 mount:
   # 是否挂载故障模块：true=解析后自动挂载并注入故障；false=纯解析模式（只落库，应用正常启动不注入）
@@ -25,11 +26,11 @@ premain:
   timeout:
     ms: 600000
 
-log:
-  # 日志目录（相对路径基于目标进程工作目录；也可设为绝对路径如 /var/log/fault）
-  dir: logs
-
 orphan:
   # 异机 pending 孤儿判定阈值（分钟）
   threshold:
     minutes: 10
+
+log:
+  # 日志目录（相对路径基于目标进程工作目录；也可设为绝对路径如 /var/log/fault）
+  dir: logs

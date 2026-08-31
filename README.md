@@ -39,29 +39,26 @@ java -Dfault.tag=round-001 \
 
 **必填项只有 `jdbc.username` 和 `jdbc.password`**（代码内强校验，缺失则进程被按策略 kill）；其余均有代码默认值，按需修改。
 
-| 键 | 必填 | 默认值（代码内） | 说明 |
-|---|---|---|---|
-| `jdbc.host` | 否 | `127.0.0.1` | MySQL 地址，**跨机部署必须改成 MySQL 所在机器 IP** |
-| `jdbc.username` | **是** | — | 数据库用户 |
-| `jdbc.password` | **是** | — | 数据库密码 |
-| `jdbc.url` | 否 | 按 jdbc.host 拼接 | 整串覆盖连接串（已含 5s/10s 连接超时，勿随意去掉） |
-| `lib.whitelist` | 否 | 空 | **lib 白名单**：bootJar 的 `BOOT-INF/lib/` 中需要解析的 jar 文件名，**逗号分隔多个**，支持前缀匹配。例：`lib.whitelist=biz-dao,biz-service,order-common-2.1.jar`。留空 = 只解析 `BOOT-INF/classes/` |
-| `mount.enabled` | 否 | `true` | **是否注入故障**：true = 解析后自动挂载模块并注入；**false = 纯解析模式**（只把类/方法清单落库，应用正常启动，不挂载不注入） |
-| `sandbox.home` | 否 | `/home/lys2/sandbox` | sandbox 工具安装目录（挂载脚本自动取其 `bin/sandbox.sh`） |
-| `premain.timeout.ms` | 否 | `600000` | premain 全程总预算（解析+落库+挂载），大项目按需调大 |
-| `orphan.threshold.minutes` | 否 | `10` | 异机孤儿解析判定阈值（分钟） |
-| `log.dir` | 否 | `logs` | agent 日志目录（相对路径基于目标进程工作目录，建议设绝对路径如 `/var/log/fault`） |
-
-> `jdbc.url` 键可整体覆盖连接串（默认按 jdbc.host 拼接，已带 5s/10s 连接超时，勿随意去掉）。
+| 键 | 必填 | 说明 |
+|---|---|---|
+| `jdbc.url` | **是** | 故障库连接串（已含 5s/10s 连接超时，勿随意去掉） |
+| `jdbc.username` | **是** | 数据库用户 |
+| `jdbc.password` | **是** | 数据库密码 |
+| `lib.whitelist` | 否 | **lib 白名单**：bootJar 的 `BOOT-INF/lib/` 中需要解析的 jar 文件名，**正则表达式（对文件名全串匹配）**，**逗号分隔多个**。例：`lib.whitelist=test-lib.*,biz-.*-common\.jar,biz-dao-1\.0\.0\.jar`。留空 = 只解析 `BOOT-INF/classes/`。非法正则会被跳过并告警 |
+| `mount.enabled` | 否（默认 `true`） | **是否注入故障**：true = 解析后自动挂载模块并注入；**false = 纯解析模式**（只把类/方法清单落库，应用正常启动，不挂载不注入） |
+| `sandbox.home` | 否（默认 `/home/lys2/sandbox`） | sandbox 工具安装目录（挂载脚本自动取其 `bin/sandbox.sh`） |
+| `premain.timeout.ms` | 否（默认 `600000`） | premain 全程总预算（解析+落库+挂载），大项目按需调大 |
+| `orphan.threshold.minutes` | 否（默认 `10`） | 异机孤儿解析判定阈值（分钟） |
+| `log.dir` | 否（默认 `logs`） | agent 日志目录（相对路径基于目标进程工作目录，建议设绝对路径如 `/var/log/fault`） |
 
 ### fault-module 的 config.yml
 
-| 键 | 必填 | 默认值（代码内） | 说明 |
-|---|---|---|---|
-| `jdbc.host` | 否 | `127.0.0.1` | MySQL 地址，须与 agent 指向同一库（跨机部署必改） |
-| `jdbc.username` | **是** | — | 数据库用户 |
-| `jdbc.password` | **是** | — | 数据库密码 |
-| `log.dir` | 否 | `logs` | 模块日志目录（module 独立配置，与 agent 的 log.dir 互不影响） |
+| 键 | 必填 | 说明 |
+|---|---|---|
+| `jdbc.url` | **是** | 故障库连接串，须与 agent 指向同一库 |
+| `jdbc.username` | **是** | 数据库用户 |
+| `jdbc.password` | **是** | 数据库密码 |
+| `log.dir` | 否（默认 `logs`） | 模块日志目录（module 独立配置，与 agent 的 log.dir 互不影响） |
 
 ## 四、轮次（tag）机制
 

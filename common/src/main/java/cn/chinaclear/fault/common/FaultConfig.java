@@ -90,16 +90,9 @@ public final class FaultConfig {
         }
     }
 
-    /** 故障库连接：显式 jdbc.url 优先；否则用 jdbc.host（默认 127.0.0.1）拼接 */
+    /** 故障库连接（必填） */
     public String jdbcUrl() {
-        String override = get("jdbc.url", "");
-        if (!override.isEmpty()) {
-            return override;
-        }
-        String host = get("jdbc.host", "127.0.0.1");
-        return "jdbc:mysql://" + host + ":3306/fault_sandbox?useUnicode=true&characterEncoding=utf8"
-                + "&useSSL=false&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true"
-                + "&connectTimeout=5000&socketTimeout=10000";
+        return require("jdbc.url");
     }
 
     public String jdbcUsername() {
@@ -110,7 +103,7 @@ public final class FaultConfig {
         return require("jdbc.password");
     }
 
-    /** BOOT-INF/lib 白名单：jar 文件名（精确或前缀匹配），逗号分隔 */
+    /** BOOT-INF/lib 白名单：正则表达式（对 jar 文件名全串匹配），逗号分隔 */
     public List<String> libWhitelist() {
         List<String> out = new ArrayList<>();
         for (String s : get("lib.whitelist", "").split(",")) {

@@ -1,7 +1,7 @@
 # fault-module 配置（sandbox 模块侧连库：读表1/表2、写表3/表4）
-# jdbc.host 指向 Windows 宿主机，MySQL 在 Windows 便携部署
 jdbc:
-  host: 192.168.193.1
+  # 故障库连接串（必填），与 agent 指向同一库
+  url: jdbc:mysql://192.168.193.1:3306/fault_sandbox?useUnicode=true&characterEncoding=utf8&useSSL=false&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true&connectTimeout=5000&socketTimeout=10000
   username: root
   password: root123
 
