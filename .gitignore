@@ -9,3 +9,8 @@ logs/
 .run/
 .codebuddy/
 compile-out.txt
+/cn/
+/test-app/
+/test-lib/
+/scripts/
+/tests/

@@ -223,7 +223,8 @@ java -Dfault.tag=round-001 \
 | `common` | 公共代码：解析器、JDBC/DAO、配置、日志、kill 工具、`schema.sql` |
 | `fault-agent` | **agent**（premain 定位/解析/落库/挂载），fat jar 内 mysql-connector/ASM 等已 shadow relocate 到 `cn.chinaclear.fault.shaded.*`，避免与应用依赖冲突 |
 | `fault-module` | **sandbox 模块**（inject 命令 + 行级监听），运行在 sandbox 独立 classloader，无需 relocate |
-| `test-app` / `test-lib` | 验证用 Spring Boot 应用与白名单 lib（非部署产物） |
+
+> `test-app` / `test-lib`（验证用 Spring Boot 应用与白名单 lib）与 `scripts/`（部署辅助脚本）为**本机验证资源，未纳入 git**；`git clone` 后如需跑验证用例，需自行准备或从既有环境获取。`settings.gradle` 仍引用这两个模块，缺失时用 `gradlew :fault-agent:shadowJar :fault-module:shadowJar` 只构建部署产物即可。
 
 ```bash
 # Windows（项目根目录）
@@ -240,7 +241,7 @@ gradlew.bat :fault-agent:shadowJar :fault-module:shadowJar
 | agent | `fault-agent/build/libs/fault-agent-1.0.0.jar` | 任意目录，`-javaagent` 引用 |
 | module | `fault-module/build/libs/fault-module-1.0.0.jar` | `<sandbox安装目录>/sandbox-module/` |
 
-附：`gradlew.bat build` 编译全部模块（含 test-app/test-lib 的 bootJar，验证用）。
+附：`gradlew.bat build` 会编译全部模块（含本机才有的 test-app/test-lib 验证模块）；只出部署产物用上面两条 shadowJar 命令即可。
 
 **注意事项**：
 
