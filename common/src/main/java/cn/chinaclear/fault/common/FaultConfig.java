@@ -172,11 +172,6 @@ public final class FaultConfig {
         return getLong("mount.timeout.ms", 1200000L);
     }
 
-    /** 异机 pending 孤儿判定阈值（分钟） */
-    public int orphanThresholdMinutes() {
-        return getInt("orphan.threshold.minutes", 10);
-    }
-
     /**
      * 注入排除：方法正则，对 "完全限定类名.方法名" 全串匹配，YAML 列表一行一个（兼容逗号分隔），命中的方法不注入。
      * 排除某个类的所有方法写 "全限定类名\..*"，例如 cn\.demo\.OrderService\..*

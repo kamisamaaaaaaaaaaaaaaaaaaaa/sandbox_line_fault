@@ -49,15 +49,15 @@
 
 - 操作：两个 test-app 实例（不同端口）同时启动并同时请求 create
 - 命令预期：仅一个实例死（另一个存活或因其他行死亡）
-- 数据库预期：t_jar_record 无重复 completed 行（状态机去重）；同一行 t_fault_record 仅一条
+- 数据库预期：t_jar_record 无重复行（uk(sha256) 登记），两个实例可能各自解析同一单元（幂等收敛），最终 completed；同一行 t_fault_record 仅一条
 - 结果：☐ 通过 ☐ 失败
 
-## TC6 本机中断续传
+## TC6 未完成时重新解析
 
-- 操作：手工把 CLASSES 单元行改为 `status='pending', parsed_at=NULL`（ip 保持本机）→ 重启应用
+- 操作：手工把 CLASSES 单元行改为 `status='pending', parsed_at=NULL` → 重启应用
 - 命令预期：启动成功
-- 日志预期：agent 立即重解析（不等孤儿阈值），出现 `unit stored`
-- 数据库预期：该单元 status 回到 completed；t_class_method 行数不变（INSERT IGNORE 幂等）
+- 日志预期：agent 直接重新解析（无等待、无抢占判定），出现 `unit stored`
+- 数据库预期：该单元 status 回到 completed，ip/hostname 为本次解析节点；t_class_method 行数不变（INSERT IGNORE 幂等）
 - 结果：☐ 通过 ☐ 失败
 
 ## TC7 挂载失败硬保护

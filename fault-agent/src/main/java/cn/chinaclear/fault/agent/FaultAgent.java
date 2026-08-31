@@ -7,7 +7,6 @@ import cn.chinaclear.fault.common.KillUtil;
 import cn.chinaclear.fault.common.MachineInfo;
 import cn.chinaclear.fault.common.SchemaInitializer;
 import cn.chinaclear.fault.common.dao.ErrorRecordDao;
-import cn.chinaclear.fault.common.dao.JarRecordDao;
 import cn.chinaclear.fault.common.model.ErrorRecord;
 
 import java.lang.instrument.Instrumentation;
@@ -85,16 +84,7 @@ public final class FaultAgent {
         }
         try {
             JdbcHelper db = new JdbcHelper(config.jdbcUrl(), config.jdbcUsername(), config.jdbcPassword());
-            JarRecordDao recordDao = new JarRecordDao(db);
-            if (e.unitIds != null) {
-                for (Long id : e.unitIds) {
-                    try {
-                        recordDao.markFailed(id);
-                    } catch (Throwable ignore) {
-                        // keep marking others
-                    }
-                }
-            }
+            // 表1 不做任何回退：未完成（pending）的单元下次启动会被重新解析，表4 记录错误详情即可
             ErrorRecord er = new ErrorRecord();
             er.setPhase(e.phase);
             er.setErrorType(e.errorType);

@@ -34,11 +34,6 @@ premain:
     timeout:
       ms: 1200000
 
-orphan:
-  # 异机 pending 孤儿判定阈值（分钟）
-  threshold:
-    minutes: 10
-
 log:
   # 日志目录（相对路径基于目标进程工作目录；也可设为绝对路径如 /var/log/fault）
   dir: logs

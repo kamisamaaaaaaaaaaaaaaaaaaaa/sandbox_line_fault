@@ -8,6 +8,7 @@ import cn.chinaclear.fault.common.MachineInfo;
 import cn.chinaclear.fault.common.dao.ClassMethodDao;
 import cn.chinaclear.fault.common.dao.ErrorRecordDao;
 import cn.chinaclear.fault.common.dao.JarRecordDao;
+import cn.chinaclear.fault.common.model.ClassMethodInfo;
 import cn.chinaclear.fault.common.model.ErrorRecord;
 import cn.chinaclear.fault.common.model.JarRecord;
 
@@ -17,7 +18,14 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 
-/** 解析编排：单元划分结果 → 表1 状态机 → 表2 幂等落库 → 单元 id 列表（供挂载命令传参） */
+/**
+ * 解析编排：单元划分 → 表1 登记与跳过判定 → 表2 幂等落库 → 单元 id 列表（供挂载命令传参）。
+ *
+ * 两态模型（无抢占、无等待）：
+ *  completed = 已完成，跳过复用；任何其他状态 = 未完成，本节点直接解析。
+ * 多节点同时解析同一单元属预期行为：表2 唯一索引 + INSERT IGNORE 幂等收敛，
+ * 表1 由最后完成的节点覆盖（ip/机器名/计数/parsed_at 为观测信息，不参与决策）。
+ */
 final class ParseOrchestrator {
 
     private ParseOrchestrator() {
@@ -32,153 +40,61 @@ final class ParseOrchestrator {
             throw HardProtectException.exception("PARSE", "parse bootJar failed: " + e.getMessage(),
                     FaultAgent.stackOf(e), null, bootJarPath);
         }
-        checkDeadline(deadline, bootJarPath, null);
+        checkDeadline(deadline, bootJarPath);
 
         JdbcHelper db = new JdbcHelper(config.jdbcUrl(), config.jdbcUsername(), config.jdbcPassword());
         JarRecordDao recordDao = new JarRecordDao(db);
         ClassMethodDao methodDao = new ClassMethodDao(db);
 
         List<Long> unitIds = new ArrayList<>();
-        List<Long> inFlight = new ArrayList<>();
         for (BootJarParser.ParseUnit unit : units) {
-            checkDeadline(deadline, bootJarPath, snapshot(inFlight));
-            unitIds.add(handleUnit(config, recordDao, methodDao, unit, bootJarPath, deadline, inFlight));
+            checkDeadline(deadline, bootJarPath);
+            UnitRegistration reg = registerUnit(recordDao, unit, bootJarPath);
+            unitIds.add(reg.unitId);
+            if (reg.completed) {
+                FaultLogger.info("unit already completed, skip: source=" + unit.sourceJar
+                        + " unitId=" + reg.unitId);
+                continue;
+            }
+            // 未完成：本节点直接解析（不抢占、不等待他节点），表2 幂等收敛
+            storeUnit(config, recordDao, methodDao, unit, reg.unitId, bootJarPath);
         }
         return unitIds;
     }
 
-    /** 单元状态机：返回该单元最终对应的表1 id */
-    private static long handleUnit(FaultConfig config, JarRecordDao recordDao, ClassMethodDao methodDao,
-                                   BootJarParser.ParseUnit unit, String bootJarPath,
-                                   long deadline, List<Long> inFlight) {
-        long unitId;
-        Long newId;
+    /** 表1 登记：INSERT IGNORE 占位拿 id；已存在则读取状态判定是否已完成 */
+    private static UnitRegistration registerUnit(JarRecordDao recordDao, BootJarParser.ParseUnit unit,
+                                                 String bootJarPath) {
         try {
-            newId = recordDao.tryInsertPending(unit.unitType, unit.sha256, unit.sourceJar, bootJarPath);
+            Long newId = recordDao.tryInsertPending(unit.unitType, unit.sha256, unit.sourceJar, bootJarPath);
+            if (newId != null) {
+                return new UnitRegistration(newId, false);
+            }
+            JarRecord existing = recordDao.findBySha256(unit.sha256);
+            if (existing == null) {
+                throw HardProtectException.exception("DB", "record disappeared after conflict: " + unit.sha256,
+                        null, null, bootJarPath);
+            }
+            return new UnitRegistration(existing.getId(), "completed".equals(existing.getStatus()));
+        } catch (HardProtectException e) {
+            throw e;
         } catch (RuntimeException e) {
-            throw HardProtectException.exception("DB", "insert pending failed: " + e.getMessage(),
-                    FaultAgent.stackOf(e), snapshot(inFlight), bootJarPath);
-        }
-
-        if (newId != null) {
-            // 首次解析：本节点负责
-            unitId = newId;
-            inFlight.add(unitId);
-            storeUnit(config, recordDao, methodDao, unit, unitId, bootJarPath);
-            removeInFlight(inFlight, unitId);
-            return unitId;
-        }
-
-        // 已存在：读状态走状态机
-        JarRecord existing = recordDao.findBySha256(unit.sha256);
-        if (existing == null) {
-            throw HardProtectException.exception("DB", "record disappeared after conflict: " + unit.sha256,
-                    null, snapshot(inFlight), bootJarPath);
-        }
-        unitId = existing.getId();
-        String status = existing.getStatus();
-
-        if ("completed".equals(status)) {
-            FaultLogger.info("unit already completed, skip: source=" + unit.sourceJar + " unitId=" + unitId);
-            return unitId;
-        }
-
-        if ("failed".equals(status)) {
-            if (recordDao.claimForReparse(unitId, MachineInfo.hostname(), MachineInfo.ip())) {
-                FaultLogger.info("re-parse claimed (previous FAILED): unitId=" + unitId + " source=" + unit.sourceJar);
-                inFlight.add(unitId);
-                storeUnit(config, recordDao, methodDao, unit, unitId, bootJarPath);
-                removeInFlight(inFlight, unitId);
-            } else {
-                // 抢占失败 = 他节点已抢先把状态改成 pending 并接手重解析：
-                // 必须等待其结果，否则本节点会带着不完整的方法清单去挂载
-                FaultLogger.info("re-parse claimed by other node first, waiting for its result: unitId=" + unitId);
-                waitForOtherNode(config, recordDao, methodDao, unit, unitId, bootJarPath, deadline, inFlight);
-            }
-            return unitId;
-        }
-
-        // pending：区分本机中断 与 异机解析中
-        boolean ownPending = MachineInfo.ip().equals(existing.getIp())
-                && bootJarPath.equals(existing.getBootJar());
-        boolean orphan = System.currentTimeMillis() - existing.getUpdatedAt().getTime()
-                >= (long) config.orphanThresholdMinutes() * 60000L;
-        if (ownPending || orphan) {
-            String reason = ownPending ? "pending left by THIS machine (interrupted)" : "orphan pending on other node (timeout)";
-            if (recordDao.claimForReparse(unitId, MachineInfo.hostname(), MachineInfo.ip())) {
-                FaultLogger.info("re-parse claimed (" + reason + "): unitId=" + unitId + " source=" + unit.sourceJar);
-                inFlight.add(unitId);
-                storeUnit(config, recordDao, methodDao, unit, unitId, bootJarPath);
-                removeInFlight(inFlight, unitId);
-            } else {
-                FaultLogger.info("claim lost to other node (" + reason + "), skip: unitId=" + unitId);
-            }
-            return unitId;
-        }
-
-        // 异机 pending 且未超时：其他节点解析中——轮询等待其完成（数据齐了才能保证本节点挂载覆盖完整）
-        waitForOtherNode(config, recordDao, methodDao, unit, unitId, bootJarPath, deadline, inFlight);
-        return unitId;
-    }
-
-    /**
-     * 等待他节点完成解析：轮询表1，出现以下情况之一才返回：
-     * ① 他节点 completed（数据可用）；② 他节点 failed 且本节点抢占成功并解析完成；
-     * ③ 他节点 pending 超过孤儿阈值且本节点抢占成功并解析完成。
-     * 超时/中断/记录消失 → 硬保护。
-     */
-    private static void waitForOtherNode(FaultConfig config, JarRecordDao recordDao, ClassMethodDao methodDao,
-                                         BootJarParser.ParseUnit unit, long unitId, String bootJarPath,
-                                         long deadline, List<Long> inFlight) {
-        FaultLogger.info("waiting for other node to finish parsing: unitId=" + unitId + " source=" + unit.sourceJar);
-        while (true) {
-            checkDeadline(deadline, bootJarPath, snapshot(inFlight));
-            try {
-                Thread.sleep(1000L);
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                throw HardProtectException.exception("PARSE", "wait interrupted", null, snapshot(inFlight), bootJarPath);
-            }
-            JarRecord latest = recordDao.findBySha256(unit.sha256);
-            if (latest == null) {
-                throw HardProtectException.exception("DB", "record disappeared while waiting: " + unit.sha256,
-                        null, snapshot(inFlight), bootJarPath);
-            }
-            if ("completed".equals(latest.getStatus())) {
-                FaultLogger.info("other node completed, proceed: unitId=" + unitId + " source=" + unit.sourceJar);
-                return;
-            }
-            if ("failed".equals(latest.getStatus())
-                    && recordDao.claimForReparse(unitId, MachineInfo.hostname(), MachineInfo.ip())) {
-                // 对方解析失败置了 failed，本节点接手
-                inFlight.add(unitId);
-                storeUnit(config, recordDao, methodDao, unit, unitId, bootJarPath);
-                removeInFlight(inFlight, unitId);
-                return;
-            }
-            // 仍是 pending：若 updated_at 超过孤儿阈值则接手重解析
-            if ("pending".equals(latest.getStatus())
-                    && System.currentTimeMillis() - latest.getUpdatedAt().getTime()
-                    >= (long) config.orphanThresholdMinutes() * 60000L
-                    && recordDao.claimForReparse(unitId, MachineInfo.hostname(), MachineInfo.ip())) {
-                inFlight.add(unitId);
-                storeUnit(config, recordDao, methodDao, unit, unitId, bootJarPath);
-                removeInFlight(inFlight, unitId);
-                return;
-            }
+            throw HardProtectException.exception("DB", "register unit failed: " + e.getMessage(),
+                    FaultAgent.stackOf(e), null, bootJarPath);
         }
     }
 
-    /** 落库：表2 幂等批量插入 → 表1 置 completed；异常抛硬保护（携带该单元 id） */
+    /** 落库：表2 幂等批量插入 → 表1 置 completed（记录本节点为完成者）；异常抛硬保护（携带该单元 id） */
     private static void storeUnit(FaultConfig config, JarRecordDao recordDao, ClassMethodDao methodDao,
                                   BootJarParser.ParseUnit unit, long unitId, String bootJarPath) {
         try {
             methodDao.batchInsertIgnore(unitId, unit.methods);
             Set<String> classes = new HashSet<>();
-            for (cn.chinaclear.fault.common.model.ClassMethodInfo m : unit.methods) {
+            for (ClassMethodInfo m : unit.methods) {
                 classes.add(m.getClassName());
             }
-            recordDao.markCompleted(unitId, classes.size(), unit.methods.size());
+            recordDao.markCompleted(unitId, classes.size(), unit.methods.size(),
+                    MachineInfo.hostname(), MachineInfo.ip());
             FaultLogger.info("unit stored: type=" + unit.unitType + " source=" + unit.sourceJar
                     + " unitId=" + unitId + " classes=" + classes.size() + " methods=" + unit.methods.size());
             // 解析失败的 class 逐个记录表4（不中断整体流程）
@@ -218,18 +134,20 @@ final class ParseOrchestrator {
         }
     }
 
-    private static void checkDeadline(long deadline, String bootJarPath, List<Long> inFlight) {
+    private static void checkDeadline(long deadline, String bootJarPath) {
         if (System.currentTimeMillis() > deadline) {
-            throw HardProtectException.timeout("PARSE", "premain deadline exceeded during parse/store",
-                    null, snapshot(inFlight), bootJarPath);
+            throw HardProtectException.timeout("PARSE", "parse deadline exceeded", null, null, bootJarPath);
         }
     }
 
-    private static void removeInFlight(List<Long> inFlight, long unitId) {
-        inFlight.remove(Long.valueOf(unitId));
-    }
+    /** 表1 登记结果：单元 id + 该单元是否已完成（已完成则跳过解析） */
+    private static final class UnitRegistration {
+        final long unitId;
+        final boolean completed;
 
-    private static List<Long> snapshot(List<Long> inFlight) {
-        return inFlight.isEmpty() ? null : new ArrayList<>(inFlight);
+        UnitRegistration(long unitId, boolean completed) {
+            this.unitId = unitId;
+            this.completed = completed;
+        }
     }
 }

@@ -20,7 +20,7 @@
 │ 目标应用 JVM（java -javaagent:fault-agent.jar -jar app.jar）      │
 │                                                                │
 │  ┌─ premain（主线程，应用启动前）────────────────────────────┐    │
-│  │ fault-agent：定位bootJar → 解析单元hash → 表1状态机去重      │    │
+│  │ fault-agent：定位bootJar → 解析单元hash → 表1登记/跳过判定    │    │
 │  │            → ASM解析 → INSERT IGNORE落表2 → 置completed    │    │
 │  │            → 同步执行 sandbox.sh 挂载模块（阻塞等待）         │    │
 │  │            → 失败/超时：表4 + kill（硬保护）                │    │
@@ -62,25 +62,20 @@
 - **行号不入库**：sandbox 的 `beforeLine(advice, lineNum)` 回调自带行号，静态解析只需方法名+描述符；表2 的 `INSERT IGNORE`（业务唯一索引）天然幂等。
 - **synthetic 边界**：synthetic 方法仅纳入 `lambda$` 前缀（lambda 体内是用户逻辑，实测命中 `lambda$auditAll$0` 内部行）；bridge/access$ 等转发型 synthetic 排除（方法体 1-2 行转发且行号指向原声明处，hook 会与目标方法重复命中）；`<clinit>` 排除（见 D10）。
 
-### D3 并发解析：唯一键占位 + 状态机
+### D3 并发解析：两态 + 幂等收敛（无抢占、无等待）
 
-多节点同时启动会同时尝试解析同一单元。解法是**数据库占位**：
+多节点同时启动会同时解析同一单元。这里**不做抢占、不做等待、不做孤儿判定**，只保留两态：
 
-- 先 `INSERT` 一行 `status=pending`（sha256 唯一索引）——插入成功者获得解析权，天然防并发重复；
-- 冲突方读状态分流：`completed` 跳过 / `failed` 重解析 / `pending` 超时（孤儿）抢占重解析；
-- 重解析不需要清理旧数据：表2 唯一索引 `uk(unit_id,class,method,desc)` + `INSERT IGNORE`，增量补齐收敛到与全量解析一致的结果。
-- 状态机分支（含"本机中断识别"）见下：
-
-| 读到的状态 | 判定 | 动作 |
+| 读到的状态 | 语义 | 动作 |
 |---|---|---|
-| 无记录 | 首次解析 | 插入 pending 后解析 |
-| completed | 已解析 | 跳过 |
-| failed | 上次解析异常 | 条件 UPDATE 置回 pending + 刷新本节点 hostname/ip → 解析；**抢占失败（他节点刚接手）→ 轮询等待其结果** |
-| pending 且 ip=自己 且 boot_jar 相同 | 本机上次解析中断（进程被 kill） | 立即重解析，不等超时 |
-| pending 且 ip≠自己、未超时 | 其他节点解析中 | 每秒轮询等待：对方 completed → 放行挂载；对方 failed/变孤儿 → 抢占接手 |
-| pending 且 ip≠自己、超时 | 异机孤儿 | 抢占重解析 |
+| 无记录 | 首次解析 | 登记（INSERT IGNORE 取 id）→ 解析 → 置 completed |
+| completed | 已完成 | 跳过复用（二次启动不重复解析） |
+| 任何其他状态（pending / 历史 failed） | 未完成 | **本节点直接解析**，解析完成置 completed |
 
-同机多实例同时抢到同一 pending 也无害：表2 幂等收敛。
+正确性完全由表2 保证：唯一索引 `uk(unit_id,class,method,desc)` + `batchInsertIgnore` 幂等。
+多节点解析的是**同一个 sha256 的 jar**（内容字节级相同），因此各自解析出的方法集合一致，并集即任一节点的结果，收敛无差异——重复解析只是多花一次 CPU，不产生数据冲突。
+
+表1 只做**登记与观测**：`markCompleted` 以最后完成的节点覆盖（ip/机器名/计数/parsed_at 为观测信息，不参与任何决策）。解析中断的行保持"未完成"状态，下次启动（无论本机还是他机）直接重新解析，无需识别"孤儿"。
 
 ### D4 挂载时机：同步阻塞在 premain 里
 
@@ -88,7 +83,7 @@
 
 **premain 阶段能被 attach 吗**：可以。sandbox.sh 从外部进程 attach 本 JVM，Attach Listener 是独立线程；主线程阻塞在 native 等待（waitFor）不挡 safepoint，retransform 的 VM_Operation 可正常完成——已在 Linux OpenJDK 21 实测打通。
 
-**失败语义（硬保护）**：超时拆成两阶段独立计时——`parse.timeout.ms`（默认 15 分钟：定位后的解析+落库，含等待异机 pending）与 `mount.timeout.ms`（默认 20 分钟：attach + 模块 inject + watch 注册）。任一阶段超时或异常 → 表1 置 failed（仅解析中单元；挂载阶段失败不动已完成的解析结果）→ 写表4（DB 不可用则降级本地日志）→ `kill` 当前进程。DB 挂起时 connectTimeout/socketTimeout（5s/10s）保证 kill 必达。配置文件缺失/非法同样硬保护（此时无库可写，仅本地日志留痕）。
+**失败语义（硬保护）**：超时拆成两阶段独立计时——`parse.timeout.ms`（默认 15 分钟：定位后的登记+解析+落库）与 `mount.timeout.ms`（默认 20 分钟：attach + 模块 inject + watch 注册）。任一阶段超时或异常 → 写表4（DB 不可用则降级本地日志）→ `kill` 当前进程。表1 **不做回退**：未完成的行保持未完成，下次启动重新解析；已 completed 的结果不受挂载失败影响。DB 挂起时 connectTimeout/socketTimeout（5s/10s）保证 kill 必达。配置文件缺失/非法同样硬保护（此时无库可写，仅本地日志留痕）。
 
 ### D5 kill 前的判重：轮次 tag + 数据库唯一索引
 
@@ -124,7 +119,7 @@ sandbox 1.4.0 的 `EventWatchBuilder` 没有 `withLoad()`（更高版本 API）�
 
 ### D10 日志体系
 
-不依赖 slf4j（避免实现类冲突），自写 `FaultLogger`：同步写文件（`logs/fault-agent.log` / `logs/fault-module.log`）+ stdout，时间戳+线程名+级别，异常带堆栈；日志目录不可写时降级为仅 stdout。关键分支全覆盖：premain 各阶段、状态机每个分支的原因（failed 重解析/本机中断/孤儿抢占/被他节点抢先）、mount 命令与输出、命中与抢占、DuplicateKey 放行（每行仅首次）、kill 命令执行结果与兜底分支。
+不依赖 slf4j（避免实现类冲突），自写 `FaultLogger`：同步写文件（`logs/fault-agent.log` / `logs/fault-module.log`）+ stdout，时间戳+线程名+级别，异常带堆栈；日志目录不可写时降级为仅 stdout。关键分支全覆盖：premain 各阶段、单元登记与跳过判定（首次/已完成跳过/未完成重解析）、mount 命令与输出、命中与抢占、DuplicateKey 放行（每行仅首次）、kill 命令执行结果与兜底分支。
 
 ## 4. 数据模型
 
@@ -132,7 +127,7 @@ sandbox 1.4.0 的 `EventWatchBuilder` 没有 `withLoad()`（更高版本 API）�
 
 | 表 | 语义 | 关键约束 |
 |---|---|---|
-| `t_jar_record` | 解析单元（状态机 pending/completed/failed） | `uk(sha256)` 占位防并发 |
+| `t_jar_record` | 解析单元（两态：completed / 未完成） | `uk(sha256)` 登记（不用于抢占） |
 | `t_class_method` | 类-方法明细 | `uk(unit_id,class,method,desc)` 幂等 |
 | `t_fault_record` | 故障命中（含轮次 tag） | `uk(unit_id,class,method,line,tag)` 轮内抢占 |
 | `t_error_record` | 工具自身错误 | — |

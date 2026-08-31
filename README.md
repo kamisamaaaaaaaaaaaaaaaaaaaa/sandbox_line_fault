@@ -47,9 +47,8 @@ java -Dfault.tag=round-001 \
 | `lib.whitelist` | 否 | **lib 白名单**：bootJar 的 `BOOT-INF/lib/` 中需要解析的 jar 文件名，**正则表达式（对文件名全串匹配）**。**YAML 列表写法，一行一个 `- ` 开头**。**不配置该参数 = 只解析 `BOOT-INF/classes/`**。非法正则会被跳过并告警 |
 | `mount.enabled` | 否（默认 `true`） | **是否注入故障**：true = 解析后自动挂载模块并注入；**false = 纯解析模式**（只把类/方法清单落库，应用正常启动，不挂载不注入） |
 | `sandbox.home` | **是**（`mount.enabled=true` 时） | sandbox 工具安装目录（挂载脚本自动取其 `bin/sandbox.sh`）。缺失在解析开始前即硬保护，不会白跑解析 |
-| `parse.timeout.ms` | 否（默认 `900000`，15 分钟） | **解析阶段总预算**：从 premain 进入时起算，覆盖全部单元的解析/落库/等待/接管，**期间发生多少次接管都不重置**；超时即硬保护 |
+| `parse.timeout.ms` | 否（默认 `900000`，15 分钟） | **解析阶段总预算**：从 premain 进入时起算，覆盖本节点全部单元的登记/解析/落库（无等待、无接管，各节点各算各的）；超时即硬保护 |
 | `mount.timeout.ms` | 否（默认 `1200000`，20 分钟） | **挂载阶段超时**：从解析完成、开始挂载时起算，与解析阶段**各自独立计时** |
-| `orphan.threshold.minutes` | 否（默认 `10`） | **孤儿 pending 判定阈值**：不是计时器，看的是表1 中该行自己的 `updated_at`（最后被任何节点触碰的时间，每次插入/接管/置状态都会刷新）。`now - updated_at` 超过阈值才允许他节点抢占接手；每次接管后重新计满 |
 | `log.dir` | 否（默认 `logs`） | agent 日志目录（相对路径基于目标进程工作目录，建议设绝对路径如 `/var/log/fault`） |
 
 ### fault-module 的 config.yml
@@ -83,7 +82,7 @@ java -Dfault.tag=round-001 \
 | `schema check OK: all 4 tables exist` | 建表校验通过 |
 | `unit stored: type=CLASSES source=... unitId=N classes=A methods=B` | 该解析单元首次/重新解析完成入库 |
 | `unit already completed, skip: ... unitId=N` | 该单元此前已解析（本单元方法数不会重复入库） |
-| `re-parse claimed (previous FAILED / pending left by THIS machine / orphan pending...)` | 触发了重解析及原因 |
+| `unit stored: ...` 出现在未配置白名单的类库上 | 白名单正则命中情况 | 检查 `lib.whitelist` 列表 |
 | `mount cmd: [bash, ..., -d, fault-module/inject?id=...]` | 正在执行挂载命令 |
 | `sandbox.sh exit=0` | 挂载成功 |
 | `premain completed: mount OK, release application startup` | 应用开始启动（此刻起已处于保护中） |
@@ -107,9 +106,7 @@ java -Dfault.tag=round-001 \
 | `HARD PROTECT: phase=MOUNT, ... sandbox.sh exit code=1` | 挂载命令失败 | 看 `mount cmd` 下方的输出内容定位（权限/模块 jar 缺失等） |
 | `jvm property 'fault.tag' missing -> kill process per policy` | **启动时没加 `-Dfault.tag`**，进程被按策略 kill | 启动命令补上 `-Dfault.tag=<轮次>` |
 | `write t_error_record failed, fallback to local log only` | MySQL 不可达，错误只落在本地日志 | 恢复 MySQL 后重启 |
-| `waiting for other node to finish parsing` → `other node completed, proceed` | 异机 pending 未超时：本节点轮询等待对方解析完成 | 无需处理 |
-| `re-parse claimed (pending left by THIS machine)` | 上次解析被中断（如进程被杀），本次续传 | 无需处理 |
-| `re-parse claimed by other node first, waiting for its result` | failed 单元重解析权被他节点抢走，本节点等待其结果 | 无需处理 |
+| （无等待/接管类日志） | 解析阶段不等待他节点：未完成即各自解析，表2 幂等收敛 | 无需处理 |
 | `HARD PROTECT: ... invalid config.yml` / `required config missing` | 配置文件非法 / 必填项缺失（痕迹在 stdout/app.log，因配置不可用写不了 `logs/`） | 修正 `config.yml` 后重启 |
 
 ## 六、常见问题（FAQ）
@@ -165,15 +162,11 @@ java -Dfault.tag=round-001 \
 | A4 | 解析 bootJar | zip 打不开/损坏 | 硬保护 `PARSE` | 无 | kill |
 | A4 | 解析 class | 单个 class ASM 失败 | 跳过该类，记入 `failedClasses`，**不中断** | 无 | 继续 |
 | A4 | 解析 class | 上述失败类落表4 | 单条写失败仅 warn | 无 | 继续 |
-| A5 | 表1 抢占 | `INSERT IGNORE` 冲突（说明 sha256 已存在）但紧接着 `findBySha256` 查不到行 = 数据不一致 | 硬保护 `DB` | 无 | kill |
-| A5 | 状态=completed | 已解析过 | 跳过复用 | 不变 | 继续 |
-| A5 | 状态=failed | `claimForReparse` 抢占失败（他节点刚把状态改成 pending 并接手） | **等待他节点完成**（completed / 再次 failed 抢占 / 变孤儿抢占） | 不变 | 继续 |
-| A5 | 状态=pending（本机遗留：同 ip + 同 bootJar） | 上次本节点中断 | 立即接管重解析 | pending→completed | 继续 |
-| A5 | 状态=pending（异机且超孤儿阈值） | 他节点解析中断 | 抢占后接管重解析 | pending→completed | 继续 |
-| A5 | 状态=pending（异机未超时） | 他节点解析中 | 每秒轮询等待；对方 completed/failed 或变孤儿则接手 | 不变 | 继续 |
-| A5 | 轮询等待 | 超过 `parse.timeout.ms` | 硬保护 `PARSE/TIMEOUT`（携带解析中单元） | 解析中单元→failed | kill |
-| A5 | 轮询等待 | 记录消失 / 线程被中断 | 硬保护 `DB` / `PARSE` | 解析中单元→failed | kill |
-| A6 | 表2 落库 + 置 completed | 批量插入或更新失败 | 硬保护 `DB`（携带该单元 id） | 该单元→failed | kill |
+| A5 | 表1 登记 | `INSERT IGNORE` 冲突（说明 sha256 已存在）但紧接着 `findBySha256` 查不到行 = 数据不一致 | 硬保护 `DB` | 无 | kill |
+| A5 | 状态=completed | 该单元已解析过 | 跳过复用（不重复解析） | 不变 | 继续 |
+| A5 | 状态=未完成（pending / 历史 failed） | 首次解析，或上次解析中断、或他节点正在解析 | **本节点直接解析**（无抢占、无等待，表2 幂等收敛） | →completed | 继续 |
+| A5 | 任一单元前 | 超过 `parse.timeout.ms` 总预算 | 硬保护 `PARSE/TIMEOUT` | 未完成单元**保持未完成**（不回退），下次启动重新解析 | kill |
+| A6 | 表2 落库 + 置 completed | 批量插入或更新失败 | 硬保护 `DB`（携带该单元 id） | 该单元保持未完成 | kill |
 | A7 | 挂载 | 剩余时间 ≤ 0 / `sandbox.sh` 等待超时 | `destroyForcibly` + 硬保护 `MOUNT/TIMEOUT`（**unitIds=null**） | **不动**（解析结果有效可复用） | kill |
 | A7 | 挂载 | 非 0 退出码 / 脚本不存在 / 被中断 | 硬保护 `MOUNT` | **不动** | kill |
 | A8 | 硬保护收尾 | 表4 写失败（DB 正不可用） | 仅本地日志 | — | 仍 kill |
@@ -206,7 +199,7 @@ java -Dfault.tag=round-001 \
 | 结果 | 表1 | 表3 | 表4 | 进程 |
 |---|---|---|---|---|
 | 解析成功 | completed | — | 仅失败 class 明细 | 继续 |
-| 解析中途失败/超时 | 该单元 failed | — | 有 | kill |
+| 解析中途失败/超时 | 该单元**保持未完成**（pending，不回退） | — | 有 | kill |
 | 定位/建表/配置失败 | 无记录 | — | 有 | kill |
 | 挂载失败/超时 | **保持 completed** | — | 有 | kill |
 | 命中故障 | — | 1 行（唯一索引保证集群唯一） | — | kill |

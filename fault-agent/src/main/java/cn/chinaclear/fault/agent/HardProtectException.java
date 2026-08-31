@@ -13,7 +13,7 @@ public final class HardProtectException extends RuntimeException {
     /** TIMEOUT | EXCEPTION */
     public final String errorType;
     public final String detail;
-    /** 需要置 failed 的解析中单元（挂载阶段失败为 null，解析已 completed 的单元不动） */
+    /** 相关单元 id（仅用于表4 留痕；表1 不做回退，未完成单元下次启动重新解析） */
     public final List<Long> unitIds;
     public final String bootJar;
 

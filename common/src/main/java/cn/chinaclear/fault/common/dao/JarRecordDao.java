@@ -19,8 +19,8 @@ public final class JarRecordDao {
     }
 
     /**
-     * 尝试插入 pending 占位行（sha256 唯一键并发防重）。
-     * 返回新记录 id；null = 已存在（调用方读状态走状态机分支）。
+     * 单元登记（sha256 唯一键）：返回新记录 id；null = 已存在（调用方按 id 复用）。
+     * 仅用于取得表2 所需的 unit_id，不承担任何抢占语义。
      */
     public Long tryInsertPending(String unitType, String sha256, String sourceJar, String bootJar) {
         String sql = "INSERT IGNORE INTO t_jar_record"
@@ -39,26 +39,14 @@ public final class JarRecordDao {
     }
 
     /**
-     * 抢占重解析：条件 UPDATE 防并发，同时刷新 hostname/ip 为本节点
-     * （保证本次重解析若再中断，pending 行可被本机立即识别接管）。
+     * 标记解析完成并记录完成节点（多节点重复解析时以最后完成者覆盖，ip/机器名仅作观测）。
      */
-    public boolean claimForReparse(long id, String hostname, String ip) {
-        int n = db.execute("UPDATE t_jar_record"
-                        + " SET status='pending', parsed_at=NULL, hostname=?, ip=?"
-                        + " WHERE id=? AND status IN ('failed','pending')",
-                new Object[]{hostname, ip, id});
-        return n == 1;
-    }
-
-    public void markCompleted(long id, int classCount, int methodCount) {
+    public void markCompleted(long id, int classCount, int methodCount, String hostname, String ip) {
         db.execute("UPDATE t_jar_record"
-                        + " SET status='completed', class_count=?, method_count=?, parsed_at=NOW()"
+                        + " SET status='completed', class_count=?, method_count=?, parsed_at=NOW(),"
+                        + " hostname=?, ip=?"
                         + " WHERE id=?",
-                new Object[]{classCount, methodCount, id});
-    }
-
-    public void markFailed(long id) {
-        db.execute("UPDATE t_jar_record SET status='failed' WHERE id=?", new Object[]{id});
+                new Object[]{classCount, methodCount, hostname, ip, id});
     }
 
     static JarRecord map(ResultSet rs) throws SQLException {
