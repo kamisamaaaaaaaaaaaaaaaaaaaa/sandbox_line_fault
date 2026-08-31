@@ -29,4 +29,13 @@ public final class FaultRecordDao {
                         fr.getFaultType(), new Timestamp(fr.getOccurredAt().getTime())},
                 null);
     }
+
+    /** 回滚误插入的记录：kill 未生效时调用，避免脏判重数据永久阻止该行本轮注入 */
+    public int delete(FaultRecord fr) {
+        String sql = "DELETE FROM t_fault_record"
+                + " WHERE unit_id=? AND tag=? AND class_name=? AND method_name=? AND line_no=?";
+        return db.execute(sql,
+                new Object[]{fr.getUnitId(), fr.getTag(), fr.getClassName(),
+                        fr.getMethodName(), fr.getLineNo()});
+    }
 }

@@ -93,7 +93,10 @@ public final class FaultAgent {
             // DB 不可用：退化为本地日志
             FaultLogger.error("write t_error_record failed, fallback to local log only", t2);
         }
-        KillUtil.killCurrentProcess(currentPid());
+        if (!KillUtil.killCurrentProcess(currentPid())) {
+            // 命令级 kill 未生效：halt 最终兜底（表4 记录保留作审计痕迹）
+            Runtime.getRuntime().halt(137);
+        }
     }
 
     static long currentPid() {

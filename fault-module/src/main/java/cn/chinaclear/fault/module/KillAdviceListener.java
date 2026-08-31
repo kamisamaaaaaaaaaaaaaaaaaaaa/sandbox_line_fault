@@ -68,7 +68,6 @@ final class KillAdviceListener extends AdviceListener {
 
             boolean won = faultRecordDao.tryInsert(fr);
             if (won) {
-                fired.set(true);
                 FaultLogger.error("FAULT HIT & PREEMPTED: tag=" + tag
                         + " unitId=" + unitId
                         + " class=" + className
@@ -76,7 +75,20 @@ final class KillAdviceListener extends AdviceListener {
                         + " line=" + lineNum
                         + " thread=" + fr.getThreadName()
                         + " machine=" + fr.getHostname() + "/" + fr.getIp());
-                KillUtil.killCurrentProcess(pid);
+                boolean killed = KillUtil.killCurrentProcess(pid);
+                if (!killed) {
+                    // 极端场景：所有 kill 手段未生效（进程仍存活）——回滚故障记录，
+                    // 避免脏判重数据永久阻止该行本轮注入，随后 halt 兜底
+                    FaultLogger.error("kill not effective, rollback fault record: " + lineKey);
+                    try {
+                        faultRecordDao.delete(fr);
+                    } catch (Throwable ignore) {
+                        // rollback failure is irrelevant
+                    }
+                    fired.set(false);
+                    preemptedLines.remove(lineKey);
+                    Runtime.getRuntime().halt(137);
+                }
             } else {
                 // DuplicateKey：该行本轮已被其他节点触发，记忆后放行（不再反复撞库）
                 preemptedLines.add(lineKey);
