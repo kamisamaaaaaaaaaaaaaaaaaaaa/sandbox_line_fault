@@ -4,7 +4,7 @@ import lombok.Data;
 
 import java.util.Date;
 
-/** 表3 t_fault_record：故障注入记录（集群级抢占命中） */
+/** 表3 t_fault_record：故障注入记录（判重键 = tag + bootJar 部署路径 + 类 + 方法 + 行） */
 @Data
 public class FaultRecord {
     private long unitId;
@@ -12,6 +12,10 @@ public class FaultRecord {
     private String tag;
     private String hostname;
     private String ip;
+    /** 应用 bootJar 完整部署路径（判重键：路径即应用标识） */
+    private String bootJar;
+    /** MD5(bootJar) 前 16 位 hex（索引键） */
+    private String bootJarHash;
     private String className;
     private String methodName;
     private int lineNo;

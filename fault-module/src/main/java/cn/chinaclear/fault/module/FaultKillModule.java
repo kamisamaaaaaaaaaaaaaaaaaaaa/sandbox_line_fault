@@ -61,6 +61,11 @@ public class FaultKillModule implements Module {
             }
 
             unitIds = parseUnitIds(param.get("id"));
+            // 应用 bootJar 部署路径（判重键：路径即应用标识）：agent 传入（URL 编码），
+            // 缺失时兜底从 sun.java.command 解析 -jar 参数，再不行填 unknown（兼容旧 agent 不崩）
+            String bootJar = resolveBootJar(param.get("bootJar"));
+            final String bootJarHash = md5Hex16(bootJar);
+            FaultLogger.info("bootJar resolved: " + bootJar + " (hash=" + bootJarHash + ")");
             if (injectedUnits.containsAll(unitIds)) {
                 FaultLogger.info("inject skipped: units already injected, unitIds=" + unitIds + ", tag=" + tag);
                 return;
@@ -102,7 +107,8 @@ public class FaultKillModule implements Module {
 
                 // 每批一个 listener（只持本批映射，随批次释放）
                 KillAdviceListener listener =
-                        new KillAdviceListener(faultRecordDao, errorRecordDao, classToUnitId, pid, tag);
+                        new KillAdviceListener(faultRecordDao, errorRecordDao, classToUnitId, pid, tag,
+                                bootJar, bootJarHash);
                 registered += registerBatch(classMethods, listener, errorRecordDao, unitIds,
                         config.excludeMethods());
                 FaultLogger.info("batch registered: methods=" + batch.size()
@@ -256,6 +262,42 @@ public class FaultKillModule implements Module {
             new ErrorRecordDao(db).insert(er);
         } catch (Throwable t) {
             FaultLogger.error("write t_error_record failed (local log only)", t);
+        }
+    }
+
+    /**
+     * 解析应用 bootJar 部署路径：优先取 agent 经 inject 参数传入（URL 编码），
+     * 缺失时兜底从 sun.java.command 解析 -jar 参数，均不可得填 unknown（兼容旧 agent 不崩）。
+     */
+    private static String resolveBootJar(String urlEncoded) {
+        if (urlEncoded != null && !urlEncoded.trim().isEmpty()) {
+            try {
+                return java.net.URLDecoder.decode(urlEncoded, "UTF-8");
+            } catch (Throwable t) {
+                FaultLogger.warn("decode bootJar param failed: " + t.getMessage());
+            }
+        }
+        String command = System.getProperty("sun.java.command", "");
+        for (String tok : command.trim().split("\\s+")) {
+            if (tok.endsWith(".jar")) {
+                return tok;
+            }
+        }
+        return "unknown";
+    }
+
+    /** MD5 前 16 位 hex（bootJar 路径的索引键；与测试库回填算法一致） */
+    private static String md5Hex16(String value) {
+        try {
+            java.security.MessageDigest md = java.security.MessageDigest.getInstance("MD5");
+            byte[] digest = md.digest(value.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            StringBuilder sb = new StringBuilder(32);
+            for (byte b : digest) {
+                sb.append(Character.forDigit((b >> 4) & 0xF, 16)).append(Character.forDigit(b & 0xF, 16));
+            }
+            return sb.substring(0, 16);
+        } catch (Throwable t) {
+            throw new IllegalStateException("md5 unavailable", t);
         }
     }
 

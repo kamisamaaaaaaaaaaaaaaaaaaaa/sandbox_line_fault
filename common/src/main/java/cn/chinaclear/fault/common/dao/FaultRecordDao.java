@@ -22,10 +22,12 @@ public final class FaultRecordDao {
      */
     public boolean tryInsert(FaultRecord fr) {
         String sql = "INSERT INTO t_fault_record"
-                + " (unit_id, tag, hostname, ip, class_name, method_name, line_no, thread_name, fault_type, occurred_at)"
-                + " VALUES (?,?,?,?,?,?,?,?,?,?)";
+                + " (unit_id, tag, hostname, ip, boot_jar, boot_jar_hash, class_name, method_name, line_no,"
+                + " thread_name, fault_type, occurred_at)"
+                + " VALUES (?,?,?,?,?,?,?,?,?,?,?,?)";
         return db.executeInsert(sql,
-                new Object[]{fr.getUnitId(), fr.getTag(), fr.getHostname(), fr.getIp(), fr.getClassName(),
+                new Object[]{fr.getUnitId(), fr.getTag(), fr.getHostname(), fr.getIp(),
+                        fr.getBootJar(), fr.getBootJarHash(), fr.getClassName(),
                         fr.getMethodName(), fr.getLineNo(), fr.getThreadName(),
                         fr.getFaultType(), new Timestamp(fr.getOccurredAt().getTime())},
                 null);

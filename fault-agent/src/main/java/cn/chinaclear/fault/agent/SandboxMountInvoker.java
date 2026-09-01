@@ -6,7 +6,6 @@ import cn.chinaclear.fault.common.FaultLogger;
 import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStreamReader;
-import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
@@ -19,7 +18,7 @@ final class SandboxMountInvoker {
     private SandboxMountInvoker() {
     }
 
-    /** bash sandbox.sh -p <pid> -d "fault-module/inject?id=1,2,3"（必须以 sandbox/bin 为工作目录：SANDBOX_HOME_DIR=${PWD}/..） */
+    /** bash sandbox.sh -p <pid> -d "fault-module/inject?id=1,2,3&bootJar=<url编码路径>"（必须以 sandbox/bin 为工作目录：SANDBOX_HOME_DIR=${PWD}/..） */
     static void mountSync(FaultConfig config, long pid, List<Long> unitIds, String bootJarPath, long deadline) {
         long remain = deadline - System.currentTimeMillis();
         if (remain <= 0) {
@@ -28,10 +27,16 @@ final class SandboxMountInvoker {
         String home = config.sandboxHome();
         String script = home + "/bin/sandbox.sh";
         String ids = FaultAgent.joinIds(unitIds);
+        String bootJarEncoded;
+        try {
+            bootJarEncoded = java.net.URLEncoder.encode(bootJarPath, "UTF-8");
+        } catch (java.io.UnsupportedEncodingException e) {
+            throw HardProtectException.exception("MOUNT", "encode bootJar failed", null, null, bootJarPath);
+        }
         List<String> command = Arrays.asList(
                 "bash", script,
                 "-p", String.valueOf(pid),
-                "-d", "fault-module/inject?id=" + ids);
+                "-d", "fault-module/inject?id=" + ids + "&bootJar=" + bootJarEncoded);
         FaultLogger.info("mount cmd: " + command);
 
         java.io.File workDir = new java.io.File(home, "bin");

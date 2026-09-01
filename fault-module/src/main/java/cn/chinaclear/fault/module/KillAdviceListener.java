@@ -31,16 +31,23 @@ final class KillAdviceListener extends AdviceListener {
     private final long pid;
     /** 轮次标识（JVM -Dfault.tag），判重仅限轮内 */
     private final String tag;
+    /** 应用 bootJar 部署路径（判重键：路径即应用标识） */
+    private final String bootJar;
+    /** MD5(bootJar) 前 16 位 hex（索引键） */
+    private final String bootJarHash;
     /** 本轮已确认被抢占的行（避免存活节点在热路径行上反复撞库） */
     private final Set<String> preemptedLines = ConcurrentHashMap.newKeySet();
 
     KillAdviceListener(FaultRecordDao faultRecordDao, ErrorRecordDao errorRecordDao,
-                       Map<String, Long> classToUnitId, long pid, String tag) {
+                       Map<String, Long> classToUnitId, long pid, String tag,
+                       String bootJar, String bootJarHash) {
         this.faultRecordDao = faultRecordDao;
         this.errorRecordDao = errorRecordDao;
         this.classToUnitId = classToUnitId;
         this.pid = pid;
         this.tag = tag;
+        this.bootJar = bootJar;
+        this.bootJarHash = bootJarHash;
     }
 
     @Override
@@ -62,6 +69,8 @@ final class KillAdviceListener extends AdviceListener {
             fr.setTag(tag);
             fr.setHostname(MachineInfo.hostname());
             fr.setIp(MachineInfo.ip());
+            fr.setBootJar(bootJar);
+            fr.setBootJarHash(bootJarHash);
             fr.setClassName(className);
             fr.setMethodName(method);
             fr.setLineNo(lineNum);
