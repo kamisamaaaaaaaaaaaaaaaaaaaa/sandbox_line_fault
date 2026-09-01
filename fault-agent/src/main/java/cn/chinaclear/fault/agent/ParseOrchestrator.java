@@ -157,7 +157,7 @@ final class ParseOrchestrator {
                 return;
             }
             try {
-                methodDao.batchInsertIgnore(unitId, buffer);
+                methodDao.batchInsertSkipConflict(unitId, buffer);
             } catch (RuntimeException e) {
                 throw HardProtectException.exception("DB", "store unit failed: " + e.getMessage(),
                         FaultAgent.stackOf(e), Collections.singletonList(unitId), bootJarPath);

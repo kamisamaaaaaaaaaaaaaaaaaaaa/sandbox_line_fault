@@ -21,7 +21,7 @@
 │                                                                │
 │  ┌─ premain（主线程，应用启动前）────────────────────────────┐    │
 │  │ fault-agent：定位bootJar → 解析单元hash → 表1登记/跳过判定    │    │
-│  │            → ASM解析 → INSERT IGNORE落表2 → 置completed    │    │
+│  │            → ASM解析 → 冲突跳过落表2 → 置completed        │    │
 │  │            → 同步执行 sandbox.sh 挂载模块（阻塞等待）         │    │
 │  │            → 失败/超时：表4 + kill（硬保护）                │    │
 │  └────────────────────────────────────────────────────────┘    │
@@ -59,7 +59,9 @@
 ### D2 解析粒度：为什么按"解析单元"切分且行号不入库
 
 - **粒度**：`BOOT-INF/classes/` 整体一个单元，hash = 目录下全部 .class 条目按路径排序后内容聚合 SHA-256；白名单命中的每个 lib jar 各一个单元，hash = 字节流 SHA-256。任何类改动重打包后对应单元 hash 变化，自动触发重新解析。
-- **行号不入库**：sandbox 的 `beforeLine(advice, lineNum)` 回调自带行号，静态解析只需方法名+描述符；表2 的 `INSERT IGNORE`（业务唯一索引）天然幂等。
+- **行号不入库**：sandbox 的 `beforeLine(advice, lineNum)` 回调自带行号，静态解析只需方法名+描述符；表2 的唯一索引 `uk(unit_id,class,method,desc)` + 裸 INSERT 冲突跳过（SQLState 23 类判定，非 23 类错误硬保护）实现幂等。
+- **流式解析 + 分批写库（内存控制）**：解析不产生全量方法清单驻留内存——`BootJarParser` 以 `UnitSink` 回调逐条 push 方法，`UnitWriter` 累积到 `parse.batch.size`（默认 2000）即写库一次，单元结束 flush 剩余。内存占用为 O(一批方法 + 类名集合)，大项目（数十万方法）不会打爆内存。
+- **已完成单元跳过内容解析**：`beginUnit` 返回 null 时 parser 直接跳过该单元的 ASM 解析（仍计算 hash 用于判定），二次启动不再白跑一遍全量解析。
 - **流式解析 + 分批写库（内存控制）**：解析不产生全量方法清单驻留内存——`BootJarParser` 以 `UnitSink` 回调逐条 push 方法，`UnitWriter` 累积到 `parse.batch.size`（默认 2000）即写库一次，单元结束 flush 剩余。内存占用为 O(一批方法 + 类名集合)，大项目（数十万方法）不会打爆内存。
 - **已完成单元跳过内容解析**：`beginUnit` 返回 null 时 parser 直接跳过该单元的 ASM 解析（仍计算 hash 用于判定），二次启动不再白跑一遍全量解析。
 - **synthetic 边界**：synthetic 方法仅纳入 `lambda$` 前缀（lambda 体内是用户逻辑，实测命中 `lambda$auditAll$0` 内部行）；bridge/access$ 等转发型 synthetic 排除（方法体 1-2 行转发且行号指向原声明处，hook 会与目标方法重复命中）；`<clinit>` 排除（见 D10）。
@@ -70,12 +72,13 @@
 
 | 读到的状态 | 语义 | 动作 |
 |---|---|---|
-| 无记录 | 首次解析 | 登记（INSERT IGNORE 取 id）→ 解析 → 置 completed |
+| 无记录 | 首次解析 | 登记（裸 INSERT 冲突复用取 id）→ 解析 → 置 completed |
 | completed | 已完成 | 跳过复用（二次启动不重复解析） |
 | 任何其他状态（pending / 历史 failed） | 未完成 | **本节点直接解析**，解析完成置 completed |
 
-正确性完全由表2 保证：唯一索引 `uk(unit_id,class,method,desc)` + `batchInsertIgnore` 幂等。
+正确性完全由表2 保证：唯一索引 `uk(unit_id,class,method,desc)` + 裸 INSERT 冲突跳过（JDBC 标准 SQLState 23 类判定）幂等。
 多节点解析的是**同一个 sha256 的 jar**（内容字节级相同），因此各自解析出的方法集合一致，并集即任一节点的结果，收敛无差异——重复解析只是多花一次 CPU，不产生数据冲突。
+批量写库遇冲突批（并发解析同单元）自动降级逐行：冲突行跳过、非 23 类 SQL 错误立即上抛硬保护。
 **单 class 解析失败 = 硬保护**（结果不完整即不放行，宁可 kill）：保证「completed 行的 method_count 与表2 实际行数一致」这一观测不变量成立。
 
 表1 只做**登记与观测**：`markCompleted` 以最后完成的节点覆盖（ip/机器名/计数/parsed_at 为观测信息，不参与任何决策）。解析中断的行保持"未完成"状态，下次启动（无论本机还是他机）直接重新解析，无需识别"孤儿"。
@@ -91,11 +94,12 @@
 ### D5 kill 前的判重：轮次 tag + 数据库唯一索引
 
 - **问题**：多节点并行时同一行会被多个节点同时执行；且同一行跨重启、跨轮次是否应重复注入需要语义。
-- **方案**：表3 唯一索引 `uk(unit_id, class_name, method_name, line_no, tag)`。`beforeLine` 直接 `INSERT IGNORE`：
+- **方案**：表3 唯一索引 `uk(unit_id, class_name, method_name, line_no, tag)`。`beforeLine` 直接裸 INSERT，按 JDBC 标准 SQLState 判定：
   - 成功 = 本节点赢得"该行该轮"的故障执行权 → 记录后 `kill -9`；
-  - DuplicateKey = 该行本轮已被其他节点触发 → 放行继续执行。
+  - 唯一键冲突（SQLState 23 类）= 该行本轮已被其他节点触发 → 放行继续执行；
+  - **其他任何 SQL 错误（截断/非法值等非 23 类）→ 上抛走硬保护 kill**，绝不被静默吞掉——这是弃用 `INSERT IGNORE` 的核心原因（IGNORE 会把数据截断等错误也当冲突静默吞掉，可能漏 kill）。
 - **轮次 tag**：操作者给目标应用加 `-Dfault.tag=tagA`。模块 inject 时读取：缺失 → 写表4 + 直接 kill（无轮次标识的记录无法判重，按硬保护不放行）；存在 → 整轮使用该 tag。换新 tag = 所有行重新可注入。
-- **原子性**：判重完全依赖 MySQL 唯一索引（`INSERT IGNORE` 为单语句原子操作），实测 5 路并发同抢一行仅 1 条成功——不依赖应用内锁，多机多实例天然安全。进程内的 AtomicBoolean/preemptedLines 只是减少重复撞库的性能优化。
+- **原子性**：判重完全依赖数据库唯一索引（裸 INSERT 的冲突判定为单语句原子操作），实测 5 路并发同抢一行仅 1 条成功——不依赖应用内锁，多机多实例天然安全。进程内的 AtomicBoolean/preemptedLines 只是减少重复撞库的性能优化。
 
 ### D6 类加载冲突：agent 与应用共享 system classpath
 
@@ -137,4 +141,4 @@ sandbox 1.4.0 的 `EventWatchBuilder` 没有 `withLoad()`（更高版本 API）�
 
 ## 5. 已验证场景
 
-TC1-TC8（解析/跳过/命中/续抢/多节点/续传/硬保护/配置）与 V1-V4（tag 机制/lambda 命中）全部通过，明细见 `TEST_CASES.md`。并发抢占的数据库层原子性单独用 5 路并行 `INSERT IGNORE` 实测（仅 1 条成功）。
+TC1-TC8（解析/跳过/命中/续抢/多节点/续传/硬保护/配置）与 V1-V4（tag 机制/lambda 命中）全部通过，明细见 `TEST_CASES.md`。并发抢占的数据库层原子性单独用 5 路并行 `INSERT` 冲突实测（仅 1 条成功）。

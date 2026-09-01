@@ -16,18 +16,21 @@ public final class ClassMethodDao {
         this.db = db;
     }
 
-    /** 批量 INSERT IGNORE：重解析时已有行自动忽略、缺行补齐，幂等 */
-    public void batchInsertIgnore(long unitId, List<ClassMethodInfo> methods) {
+    /**
+     * 批量裸 INSERT（uk(unit_id,class,method,desc)）：约束冲突批自动降级逐行（冲突行跳过、其他错误上抛硬保护），
+     * 幂等收敛语义与原 INSERT IGNORE 一致，但非冲突 SQL 错误不再被静默吞掉。
+     */
+    public void batchInsertSkipConflict(long unitId, List<ClassMethodInfo> methods) {
         if (methods == null || methods.isEmpty()) {
             return;
         }
-        String sql = "INSERT IGNORE INTO t_class_method"
+        String sql = "INSERT INTO t_class_method"
                 + " (unit_id, class_name, method_name, method_desc) VALUES (?,?,?,?)";
         List<Object[]> rows = new ArrayList<>(methods.size());
         for (ClassMethodInfo m : methods) {
             rows.add(new Object[]{unitId, m.getClassName(), m.getMethodName(), m.getMethodDesc()});
         }
-        db.batchInsertIgnore(sql, rows);
+        db.batchInsertSkipConflict(sql, rows);
     }
 
     /** 按单元 id 列表读取全部类-方法（IN 分批） */

@@ -76,6 +76,18 @@
 - 数据库预期：t_jar_record/t_class_method 正常落库（status=completed）；t_fault_record 无新增（进程存活不命中）
 - 结果：☐ 通过 ☐ 失败
 
+## W 系列：裸 INSERT 冲突判定（替代 INSERT IGNORE）
+
+> 语义：唯一键冲突（SQLState 23 类）才放行/跳过；其他 SQL 错误（截断 22001、非法值等）一律硬保护 kill。
+
+| # | 用例 | 结果 | 备注 |
+| --- | --- | --- | --- |
+| W1 | 正常轮：首次解析批量路径 + 命中 kill | ✅ | mount OK → FAULT HIT，批量快路径无异常 |
+| W2 | 重解析幂等轮：置 pending → 重启 → 冲突批降级逐行，表2 行数不变 | ✅ | 26 行全冲突降级逐行跳过，unit stored 正常，表2=26 |
+| W3 | 两实例并发解析同单元：互相冲突降级，表1 无重复、表2 收敛 | ✅ | 表1=2 行无重复；表2=26 收敛；表3 两实例同 tag 启动：实例1 抢占 line22、实例2 冲突放行推进 line23（顺带覆盖 W5） |
+| W4 | **截断硬保护轮**：清空表2 → class_name 改 VARCHAR(10) → 重启解析 → STRICT 模式 Data truncation（非 23 类）→ HARD PROTECT kill → 恢复列宽后重启表2 自愈重建 26 行 | ✅ | `HARD PROTECT: phase=DB ... Data too long for column 'class_name'` + KILL——旧 INSERT IGNORE 会把此错误当冲突静默吞掉 |
+| W5 | 表3 冲突放行轮：同 tag 重启复现 DuplicateKey 放行日志 | ✅ | W3/W5 均实测：line22 冲突放行 → line23 新行抢占 kill |
+
 ## 执行记录
 
 | 日期 | 用例 | 结果 | 备注 |

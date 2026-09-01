@@ -19,15 +19,15 @@ public final class JarRecordDao {
     }
 
     /**
-     * 单元登记（sha256 唯一键）：返回新记录 id；null = 已存在（调用方按 id 复用）。
-     * 仅用于取得表2 所需的 unit_id，不承担任何抢占语义。
+     * 单元登记（sha256 唯一键，裸 INSERT）：返回新记录 id；null = 唯一键冲突（单元已存在，调用方按 id 复用）。
+     * 其他 SQL 错误由 JdbcHelper 上抛走硬保护。
      */
     public Long tryInsertPending(String unitType, String sha256, String sourceJar, String bootJar) {
-        String sql = "INSERT IGNORE INTO t_jar_record"
+        String sql = "INSERT INTO t_jar_record"
                 + " (unit_type, sha256, source_jar, boot_jar, hostname, ip, status)"
                 + " VALUES (?,?,?,?,?,?,'pending')";
         final Long[] newId = new Long[1];
-        boolean inserted = db.executeInsertIgnore(sql,
+        boolean inserted = db.executeInsert(sql,
                 new Object[]{unitType, sha256, sourceJar, bootJar, MachineInfo.hostname(), MachineInfo.ip()},
                 key -> newId[0] = key);
         return inserted ? newId[0] : null;

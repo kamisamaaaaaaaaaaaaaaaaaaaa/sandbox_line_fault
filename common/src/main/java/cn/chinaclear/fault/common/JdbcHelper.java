@@ -90,10 +90,23 @@ public final class JdbcHelper {
     }
 
     /**
-     * INSERT IGNORE：返回是否真正插入（false = 唯一键冲突被忽略）。
-     * keyHolder 可为空，插入成功时回调自增主键。
+     * 唯一键冲突判定：SQLState 23 类（ANSI SQL 标准的约束违反类，MySQL 23000 / PG 23505 等均属此类）
+     * 兼兜底驱动抛出的 JDBC 标准异常子类。
+     * 前提：本工具的表无外键、插入参数由代码构造保证非 null，23 类实际只可能来自唯一键冲突。
      */
-    public boolean executeInsertIgnore(String sql, Object[] params, KeyHolder keyHolder) {
+    public static boolean isConstraintConflict(SQLException e) {
+        if (e instanceof java.sql.SQLIntegrityConstraintViolationException) {
+            return true;
+        }
+        String state = e.getSQLState();
+        return state != null && state.startsWith("23");
+    }
+
+    /**
+     * 裸 INSERT（单行）：唯一键冲突返回 false（调用方语义"已存在"放行），其他 SQLException 一律上抛走硬保护。
+     * 插入成功且有 keyHolder 时回调自增主键。
+     */
+    public boolean executeInsert(String sql, Object[] params, KeyHolder keyHolder) {
         try (Connection conn = open();
              PreparedStatement ps = conn.prepareStatement(sql, Statement.RETURN_GENERATED_KEYS)) {
             bind(ps, params);
@@ -107,28 +120,53 @@ public final class JdbcHelper {
             }
             return n > 0;
         } catch (SQLException e) {
+            if (isConstraintConflict(e)) {
+                return false;
+            }
             throw new IllegalStateException("insert failed: " + sql + " - " + e.getMessage(), e);
         }
     }
 
-    /** 批量 INSERT IGNORE：单连接事务内分批提交 */
-    public void batchInsertIgnore(String sql, List<Object[]> rows) {
+    /**
+     * 批量裸 INSERT：任一批因约束冲突（SQLState 23 类）失败时回滚该批并降级逐行重放
+     * （冲突行跳过、其他错误立即上抛走硬保护）；非冲突错误直接上抛。
+     * 单连接事务，每 1000 行 executeBatch 一次。
+     */
+    public void batchInsertSkipConflict(String sql, List<Object[]> rows) {
         if (rows == null || rows.isEmpty()) {
             return;
         }
         try (Connection conn = open()) {
             boolean old = conn.getAutoCommit();
             conn.setAutoCommit(false);
-            try (PreparedStatement ps = conn.prepareStatement(sql)) {
-                int count = 0;
-                for (Object[] row : rows) {
-                    bind(ps, row);
-                    ps.addBatch();
-                    if (++count % 1000 == 0) {
+            try {
+                try (PreparedStatement ps = conn.prepareStatement(sql)) {
+                    int count = 0;
+                    for (Object[] row : rows) {
+                        bind(ps, row);
+                        ps.addBatch();
+                        if (++count % 1000 == 0) {
+                            try {
+                                ps.executeBatch();
+                            } catch (SQLException e) {
+                                conn.rollback();
+                                if (!isConstraintConflict(e)) {
+                                    throw e;
+                                }
+                                replayRowsSkippingConflict(conn, sql, rows);
+                            }
+                        }
+                    }
+                    try {
                         ps.executeBatch();
+                    } catch (SQLException e) {
+                        conn.rollback();
+                        if (!isConstraintConflict(e)) {
+                            throw e;
+                        }
+                        replayRowsSkippingConflict(conn, sql, rows);
                     }
                 }
-                ps.executeBatch();
                 conn.commit();
             } catch (Exception e) {
                 try {
@@ -147,6 +185,24 @@ public final class JdbcHelper {
             }
         } catch (SQLException e) {
             throw new IllegalStateException("batch insert failed: " + e.getMessage(), e);
+        }
+    }
+
+    /** 逐行重放：唯一键冲突（23 类）的行跳过，其他错误上抛（由调用方事务回滚） */
+    private static void replayRowsSkippingConflict(Connection conn, String sql, List<Object[]> rows)
+            throws SQLException {
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            for (Object[] row : rows) {
+                bind(ps, row);
+                try {
+                    ps.executeUpdate();
+                } catch (SQLException e) {
+                    if (!isConstraintConflict(e)) {
+                        throw e;
+                    }
+                    // 冲突行：该行已存在（他节点已写入），跳过
+                }
+            }
         }
     }
 
