@@ -34,20 +34,24 @@ CREATE TABLE IF NOT EXISTS t_class_method (
   UNIQUE KEY uk_method (unit_id, class_name, method_name, method_desc)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
--- 表3：故障注入记录（集群级抢占，判重仅限轮次内）
+-- 表3：故障注入记录（判重键 = tag + bootJar 部署路径 + 类 + 方法 + 行：
+--   部署路径即应用标识——同路径 = 同一应用的集群（集群级只 kill 一个节点）；
+--   不同路径 = 不同应用（即使同机、jar 内容相同），各自独立抢占独立 kill）
 CREATE TABLE IF NOT EXISTS t_fault_record (
-  id           BIGINT AUTO_INCREMENT PRIMARY KEY,
-  unit_id      BIGINT       NOT NULL COMMENT '→ t_jar_record.id',
-  tag          VARCHAR(64)  NOT NULL DEFAULT '' COMMENT '故障注入轮次（JVM -Dfault.tag）',
-  hostname     VARCHAR(128) NOT NULL COMMENT '死亡节点机器名',
-  ip           VARCHAR(64)  NOT NULL,
-  class_name   VARCHAR(256) NOT NULL,
-  method_name  VARCHAR(128) NOT NULL,
-  line_no      INT          NOT NULL,
-  thread_name  VARCHAR(128) NOT NULL,
-  fault_type   VARCHAR(32)  NOT NULL DEFAULT 'KILL_PROCESS',
-  occurred_at  DATETIME     NOT NULL,
-  UNIQUE KEY uk_hit_tag (unit_id, class_name, method_name, line_no, tag)
+  id            BIGINT AUTO_INCREMENT PRIMARY KEY,
+  unit_id       BIGINT       NOT NULL COMMENT '→ t_jar_record.id',
+  tag           VARCHAR(64)  NOT NULL DEFAULT '' COMMENT '故障注入轮次（JVM -Dfault.tag）',
+  hostname      VARCHAR(128) NOT NULL COMMENT '死亡节点机器名',
+  ip            VARCHAR(64)  NOT NULL COMMENT '死亡节点 IP（观测）',
+  boot_jar      VARCHAR(512) NOT NULL COMMENT '应用 bootJar 完整部署路径（判重键：路径即应用）',
+  boot_jar_hash CHAR(16)     NOT NULL COMMENT 'MD5(boot_jar) 前 16 位 hex（索引键）',
+  class_name    VARCHAR(256) NOT NULL,
+  method_name   VARCHAR(128) NOT NULL,
+  line_no       INT          NOT NULL,
+  thread_name   VARCHAR(128) NOT NULL,
+  fault_type    VARCHAR(32)  NOT NULL DEFAULT 'KILL_PROCESS',
+  occurred_at   DATETIME     NOT NULL,
+  UNIQUE KEY uk_hit_node (tag, boot_jar_hash, class_name, method_name, line_no)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 -- 表4：agent 自身错误记录（写入后进程将被 kill）
