@@ -72,8 +72,14 @@ public class FaultKillModule implements Module {
             }
             FaultLogger.info("inject requested, unitIds=" + unitIds + ", tag=" + tag
                     + ", batchSize=" + config.injectBatchSize());
+            int includeCount = config.includeMethods().size();
+            FaultLogger.info("filter: include=" + includeCount + " regex(es)"
+                    + (includeCount == 0 ? " (all methods are candidates)" : " (only matched methods are injected)")
+                    + ", exclude=" + config.excludeMethods().size() + " regex(es)"
+                    + ", driver=" + config.jdbcDriver());
 
-            JdbcHelper db = new JdbcHelper(config.jdbcUrl(), config.jdbcUsername(), config.jdbcPassword());
+            JdbcHelper db = new JdbcHelper(config.jdbcUrl(), config.jdbcUsername(), config.jdbcPassword(),
+                    config.jdbcDriver());
             ClassMethodDao methodDao = new ClassMethodDao(db);
             FaultRecordDao faultRecordDao = new FaultRecordDao(db);
             ErrorRecordDao errorRecordDao = new ErrorRecordDao(db);
@@ -108,9 +114,9 @@ public class FaultKillModule implements Module {
                 // 每批一个 listener（只持本批映射，随批次释放）
                 KillAdviceListener listener =
                         new KillAdviceListener(faultRecordDao, errorRecordDao, classToUnitId, pid, tag,
-                                bootJar, bootJarHash);
+                                bootJar, bootJarHash, config.faultTimes());
                 registered += registerBatch(classMethods, listener, errorRecordDao, unitIds,
-                        config.excludeMethods());
+                        config.includeMethods(), config.excludeMethods());
                 FaultLogger.info("batch registered: methods=" + batch.size()
                         + " classes=" + classMethods.size() + " lastId=" + lastId);
             }
@@ -124,6 +130,18 @@ public class FaultKillModule implements Module {
                 return;
             }
 
+            if (registered == 0) {
+                // 解析到了方法，但经 include/exclude 过滤后一个类都没注册：名单与解析结果无交集，
+                // 等价于"挂载了却零覆盖"，按硬保护处理（绝不放行）
+                FaultLogger.error("no class registered after include/exclude filtering, unitIds=" + unitIds
+                        + " -> kill per policy");
+                recordInjectError(errorRecordDao,
+                        "no class registered after include/exclude filtering, unitIds=" + unitIds
+                                + " (check inject.include.methods / exclude.methods)", null, unitIds);
+                KillUtil.killCurrentProcess(pid);
+                return;
+            }
+
             injectedUnits.addAll(unitIds);
             FaultLogger.info("inject done: registered=" + registered + "/" + totalClasses
                     + " classes, methods=" + totalMethods + ", tag=" + tag + ", waiting for first line hit");
@@ -132,7 +150,7 @@ public class FaultKillModule implements Module {
             FaultLogger.error("inject failed, kill process per policy", t);
             try {
                 recordInjectError(new ErrorRecordDao(new JdbcHelper(config.jdbcUrl(),
-                                config.jdbcUsername(), config.jdbcPassword())),
+                                config.jdbcUsername(), config.jdbcPassword(), config.jdbcDriver())),
                         "inject failed: " + t.getMessage(), stackOf(t), unitIds);
             } catch (Throwable ignore) {
                 // DB 不可用：仅本地日志
@@ -141,24 +159,34 @@ public class FaultKillModule implements Module {
         }
     }
 
-    /** 注册一批类的 watch（每个类一次链式注册，方法逐个 onBehavior 链上）；先按 exclude.methods 过滤 */
+    /**
+     * 注册一批类的 watch（每个类一次链式注册，方法逐个 onBehavior 链上）。
+     * 过滤顺序：先按 inject.include.methods 选入（名单为空则全部入选），再按 exclude.methods 排除；
+     * 只有既在名单内、又未被排除的方法会被注入。
+     */
     private int registerBatch(Map<String, List<String>> classMethods, KillAdviceListener listener,
                              ErrorRecordDao errorRecordDao, List<Long> unitIds,
-                             List<String> excludeMethodRegex) {
+                             List<String> includeMethodRegex, List<String> excludeMethodRegex) {
+        java.util.regex.Pattern[] includeMethod = compilePatterns(includeMethodRegex);
         java.util.regex.Pattern[] excludeMethod = compilePatterns(excludeMethodRegex);
         int registered = 0;
-        int excluded = 0;
+        int skipped = 0;
         for (Map.Entry<String, List<String>> entry : classMethods.entrySet()) {
             String className = entry.getKey();
             List<String> kept = new ArrayList<>();
             for (String name : entry.getValue()) {
-                if (!matchesAny(excludeMethod, className + "." + name)) {
-                    kept.add(name);
+                String qualifiedName = className + "." + name;
+                if (includeMethod.length > 0 && !matchesAny(includeMethod, qualifiedName)) {
+                    continue;    // 配置了名单但未命中：不注入
                 }
+                if (matchesAny(excludeMethod, qualifiedName)) {
+                    continue;    // 命中排除：不注入
+                }
+                kept.add(name);
             }
             if (kept.isEmpty()) {
-                FaultLogger.info("all methods excluded by exclude.methods, skip class: " + className);
-                excluded++;
+                FaultLogger.info("no method kept after include/exclude filtering, skip class: " + className);
+                skipped++;
                 continue;
             }
             try {
@@ -181,8 +209,8 @@ public class FaultKillModule implements Module {
                 throw new IllegalStateException("watch register failed for class=" + entry.getKey(), t);
             }
         }
-        if (excluded > 0) {
-            FaultLogger.info("excluded classes/methods batches: " + excluded);
+        if (skipped > 0) {
+            FaultLogger.info("skipped classes (no method kept): " + skipped);
         }
         return registered;
     }
@@ -193,7 +221,7 @@ public class FaultKillModule implements Module {
             try {
                 out.add(java.util.regex.Pattern.compile(r));
             } catch (Throwable t) {
-                FaultLogger.warn("invalid exclude regex \"" + r + "\", skipped: " + t.getMessage());
+                FaultLogger.warn("invalid regex \"" + r + "\", skipped: " + t.getMessage());
             }
         }
         return out.toArray(new java.util.regex.Pattern[0]);
@@ -249,7 +277,8 @@ public class FaultKillModule implements Module {
     /** 无 tag 策略：记录表4 后 kill（写表失败仅留本地日志，kill 必达） */
     private void recordMissingTag(FaultConfig config, long pid, Map<String, String> injectParam) {
         try {
-            JdbcHelper db = new JdbcHelper(config.jdbcUrl(), config.jdbcUsername(), config.jdbcPassword());
+            JdbcHelper db = new JdbcHelper(config.jdbcUrl(), config.jdbcUsername(), config.jdbcPassword(),
+                    config.jdbcDriver());
             ErrorRecord er = new ErrorRecord();
             er.setPhase("MOUNT");
             er.setErrorType("EXCEPTION");

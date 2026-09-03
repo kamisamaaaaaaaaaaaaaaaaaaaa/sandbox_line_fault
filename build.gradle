@@ -1,6 +1,12 @@
+// 根构建脚本
+//
+// 仓库统一在 gradle/repositories.gradle 定义，由 settings.gradle 挂到 gradle.ext.mavenRepositories。
+// 插件一律通过 buildscript 的 classpath 引入，不使用 plugins {} DSL——
+// 这样内网环境下插件与依赖走同一套仓库，不会出现插件单独指向外网的问题。
+
 buildscript {
     repositories {
-        mavenCentral()
+        gradle.ext.mavenRepositories(it)
     }
     dependencies {
         classpath 'com.gradleup.shadow:com.gradleup.shadow.gradle.plugin:9.4.3'
@@ -13,7 +19,7 @@ allprojects {
     version = '1.0.0'
 
     repositories {
-        mavenCentral()
+        gradle.ext.mavenRepositories(it)
     }
 }
 

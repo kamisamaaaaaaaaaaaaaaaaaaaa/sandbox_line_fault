@@ -35,21 +35,21 @@
 - 操作：应用启动完成（已挂载）后，`curl -X POST 'http://127.0.0.1:8080/order/create?amount=99'`
 - 命令预期：请求hang住或连接断开，进程被 kill -9（`echo $?` 验证 exit 137 或 shell 报 Killed）
 - 日志预期：模块日志出现 `FAULT HIT & PREEMPTED: unitId=N class=... method=create line=... thread=http-nio-*`；agent 无异常
-- 数据库预期：t_fault_record 新增一条：unit_id 对应 CLASSES 单元、hostname/ip 为本机、class_name=...OrderService、method_name=create、line_no>0、thread_name 为 http 线程
+- 数据库预期：t_fault_record 新增一条：unit_id 对应 CLASSES 单元、hostname/ip 为本机、class_name=...OrderService、method_name=create、line_no>0、thread_name 为 http 线程、fault_seq=1
 - 结果：☐ 通过 ☐ 失败
 
 ## TC4 重启后续抢
 
 - 操作：TC3 后重启应用，再次请求同一接口
 - 命令预期：应用存活（同一行 DuplicateKey 放行），业务正常返回
-- 数据库预期：t_fault_record 不新增同 (unit_id, class, method, line) 行；若命中其他未触发行则新增一条且进程死
+- 数据库预期：同一「行+线程」的故障次数未达 `inject.fault.times` 前会继续新增（`fault_seq` 递增），达到上限后不再新增；若命中其他未触发行则新增 `fault_seq=1` 且进程死
 - 结果：☐ 通过 ☐ 失败
 
 ## TC5 多节点并发
 
 - 操作：两个 test-app 实例（不同端口）同时启动并同时请求 create
 - 命令预期：仅一个实例死（另一个存活或因其他行死亡）
-- 数据库预期：t_jar_record 无重复行（uk(sha256) 登记），两个实例可能各自解析同一单元（幂等收敛），最终 completed；同一行 t_fault_record 仅一条
+- 数据库预期：t_jar_record 无重复行（uk(sha256) 登记），两个实例可能各自解析同一单元（幂等收敛），最终 completed；同一「行+线程+第几次」组合 t_fault_record 仅一条（另一实例冲突放行）
 - 结果：☐ 通过 ☐ 失败
 
 ## TC6 未完成时重新解析
@@ -57,7 +57,7 @@
 - 操作：手工把 CLASSES 单元行改为 `status='pending', parsed_at=NULL` → 重启应用
 - 命令预期：启动成功
 - 日志预期：agent 直接重新解析（无等待、无抢占判定），出现 `unit stored`
-- 数据库预期：该单元 status 回到 completed，ip/hostname 为本次解析节点；t_class_method 行数不变（INSERT IGNORE 幂等）
+- 数据库预期：该单元 status 回到 completed，ip/hostname 为本次解析节点；t_class_method 行数不变（逐行裸 INSERT 冲突跳过，SQLState 23 类判定；非 23 类错误走硬保护）
 - 结果：☐ 通过 ☐ 失败
 
 ## TC7 挂载失败硬保护
@@ -88,6 +88,35 @@
 | W4 | **截断硬保护轮**：清空表2 → class_name 改 VARCHAR(10) → 重启解析 → STRICT 模式 Data truncation（非 23 类）→ HARD PROTECT kill → 恢复列宽后重启表2 自愈重建 26 行 | ✅ | `HARD PROTECT: phase=DB ... Data too long for column 'class_name'` + KILL——旧 INSERT IGNORE 会把此错误当冲突静默吞掉 |
 | W5 | 表3 冲突放行轮：同 tag 重启复现 DuplicateKey 放行日志 | ✅ | W3/W5 均实测：line22 冲突放行 → line23 新行抢占 kill |
 
+## 每行每线程多次故障（F 系列）
+
+> 语义：判重键含 `thread_name` 与 `fault_seq`。同一行在同一线程下本轮最多发生 `inject.fault.times`（记为 N，未配置时默认 1）次故障；该行被 T 个线程执行时本轮最多 T × N 次。
+> 为控制时长，验证用 `inject.include.methods` 只注入少量方法——验证目标是机制正确性（seq 连续、各线程独立计数、用尽后零撞库），不是覆盖率。
+
+| # | 用例 | 预期 | 结果 |
+| --- | --- | --- | --- |
+| F1 | 单进程、N=3、`inject.include.methods` 限定单个方法，跑至稳定 | 该方法每行的每个线程最终 3 条记录，`fault_seq` = 1,2,3；表3 中无其他方法的记录 | ☐ 通过 ☐ 失败 |
+| F2 | 按「行+线程」核对：每个组合 `cnt=3`、`min(fault_seq)=1`、`max(fault_seq)=3` 且 `cnt=max` | 无缺号、无重复、无超额 | ☐ 通过 ☐ 失败 |
+| F3 | 线程维度独立性：同一行被 4 个线程执行 | 该行共 4 × 3 = 12 条，`(thread_name, fault_seq)` 组合唯一 | ☐ 通过 ☐ 失败 |
+| F4 | 用尽后零撞库：跑满后继续运行一段时间 | 表3 不再新增记录；模块日志不再出现该行的 `fault seq already preempted` | ☐ 通过 ☐ 失败 |
+| F5 | N=1 对照（其余配置不变，仅改 `inject.fault.times: 1`） | 退化成改造前的行为：每行每线程仅 1 条 | ☐ 通过 ☐ 失败 |
+| F6 | 默认值：不配置 `inject.fault.times`（默认 1） | 每行每线程仅 1 条记录，行为与改造前一致 | ☐ 通过 ☐ 失败 |
+| F7 | 配置健壮性：`inject.fault.times` 填 0 或负数 | 模块抛错 → 表4 留痕 → kill（硬保护） | ☐ 通过 ☐ 失败 |
+
+核对 SQL：
+
+```sql
+SELECT class_name, method_name, line_no, thread_name,
+       COUNT(*) cnt, MIN(fault_seq) min_seq, MAX(fault_seq) max_seq
+FROM t_fault_record
+WHERE tag = '<本轮tag>'
+GROUP BY class_name, method_name, line_no, thread_name
+HAVING cnt <> 3
+ORDER BY class_name, method_name, line_no, thread_name;
+```
+
+**区分「未跑满」的性质**：线程跑满 N 次需跨多个进程生命周期累计执行该行约 `1+2+…+N` 次（每次 kill 后新进程计数归零，靠冲突逐次推进）。低频线程暂未跑满属正常，继续运行会补齐；出现 `fault_seq` 缺号，或执行次数已远超 `N(N+1)/2` 仍未跑满，则为计数缺陷。
+
 ## 执行记录
 
 | 日期 | 用例 | 结果 | 备注 |
@@ -112,5 +141,5 @@
 
 > 环境备注：Linux OpenJDK 21 下 `getInputArguments()` 不含 `-jar`（JDK9+ 行为），bootJar 定位链为 sun.java.command → /proc/self/cmdline → inputArguments 三级（均失败则硬保护 kill，无配置兜底）；sandbox.sh 需以其 bin 目录为工作目录执行（SANDBOX_HOME_DIR=${PWD}/..）。
 >
-> 轮次说明：操作者在目标应用 JVM 参数加 `-Dfault.tag=<轮次标识>`；模块 inject 时读取，缺失则直接 kill 进程（表4 留痕）。判重唯一索引 `uk(unit_id,class,method,line,tag)`——新 tag 开始所有行重新可注入。
+> 轮次说明：操作者在目标应用 JVM 参数加 `-Dfault.tag=<轮次标识>`；模块 inject 时读取，缺失则直接 kill 进程（表4 留痕）。判重唯一索引 `uk(tag, boot_jar_hash, class_name, method_name, line_no, thread_name, fault_seq)`（判重键 = 轮次 + 应用部署路径 + 行 + 线程 + 第几次故障；`ip` 不参与判重）——新 tag 开始所有行重新可注入。
 

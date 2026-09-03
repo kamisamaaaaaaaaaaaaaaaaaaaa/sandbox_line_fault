@@ -1,24 +1,49 @@
 # fault-module 配置（sandbox 模块侧连库：读表1/表2、写表3/表4）
+#
+# 本文件只保留**必填项**；有默认值的配置一律注释，按需取消注释并修改（用法见各条注释）。
+# 完整说明见 README「三、配置说明」。
+
 jdbc:
   # 故障库连接串（必填），与 agent 指向同一库
   url: jdbc:mysql://192.168.193.1:3306/fault_sandbox?useUnicode=true&characterEncoding=utf8&useSSL=false&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true&connectTimeout=5000&socketTimeout=10000
   username: root
   password: root123
+  # JDBC 驱动类名（必填，无内置兜底，加载失败即硬保护 kill）
+  # **module 侧填驱动的标准类名**：模块 jar 未做 relocate，包名为驱动原始包名
+  # 换数据库时改这一项，完整步骤见 README「更换数据库」
+  driver: com.mysql.cj.jdbc.Driver
 
 inject:
-  # 分批读取方法清单的批大小（避免大项目一次性读入打爆内存）
-  batch:
-    size: 5000
+  # ========== 以下 inject 子项均有默认值，按需取消注释并修改 ==========
 
-# 注入排除（不配置 exclude 段 = 不排除任何方法；需要时取消注释并按需增删）：
+  # 每行每线程故障次数（>=1）：同一行在同一线程下本轮最多发生多少次故障
+  # 默认值：1（每行每线程本轮只发生一次故障）
+  # 该行被 T 个线程执行时，本轮最多发生 T × N 次故障
+  # fault:
+  #   times: 3
+
+  # 分批读取方法清单的批大小（避免大项目一次性读入打爆内存）
+  # 默认值：5000
+  # batch:
+  #   size: 5000
+
+  # 注入名单：方法正则，全串匹配 "完全限定类名.方法名"，一行一个（"- " 开头）
+  # 默认值：空列表 = 所有已解析方法都是注入候选
+  # 注入整类写：cn\.demo\.OrderService\..*
+  # 过滤顺序：先按 include 选入，再按 exclude 排除，两者都过才注入
+  # 若过滤后一个类都不剩（名单与解析结果无交集），判定零覆盖，写表4 后 kill
+  # include:
+  #   methods:
+  #     - cn\.demo\.service\..*
+
+# 注入排除：方法正则，全串匹配 "完全限定类名.方法名"，作用于 include 选入之后的方法
+# 默认值：空列表 = 不排除任何方法
+# 排除整类写：cn\.demo\.SafeService\..*
 # exclude:
-#   # 方法正则，全串匹配 "完全限定类名.方法名"，一行一个（"- " 开头），命中的方法不注入
-#   # 排除某个类的所有方法：- cn\.demo\.OrderService\..*
-#   # 排除单个方法：- cn\.demo\.OrderService\.pay
-#   # 正则中的 . 是通配符，表示字面量点请写 \.（不转义也能匹配，但会放宽，如 OrderService 会匹配 OrderXService）
 #   methods:
 #     - cn\.demo\.SafeService\..*
 
-log:
-  # 模块日志目录（相对路径基于目标进程工作目录）
-  dir: logs
+# log:
+#   # 模块日志目录（相对路径基于目标进程工作目录，与 agent 的 log.dir 互不影响）
+#   # 默认值：logs
+#   dir: logs

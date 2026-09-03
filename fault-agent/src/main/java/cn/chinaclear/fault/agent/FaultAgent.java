@@ -61,7 +61,12 @@ public final class FaultAgent {
             }
             // 挂载阶段独立计时（mount.timeout.ms）
             long mountDeadline = System.currentTimeMillis() + config.mountTimeoutMs();
-            SandboxMountInvoker.mountSync(config, pid, unitIds, bootJar, mountDeadline);
+            try {
+                SandboxMountInvoker.mountSync(config, pid, unitIds, bootJar, mountDeadline);
+            } finally {
+                // 无论挂载成败都托孤：mountSync 尝试期间 sandbox 已创建副本，失败路径同样泄漏
+                TmpReaper.spawnAfterMount(pid);
+            }
             FaultLogger.info("premain completed: mount OK, release application startup");
         } catch (HardProtectException e) {
             hardProtect(config, e);
@@ -83,7 +88,8 @@ public final class FaultAgent {
             return;
         }
         try {
-            JdbcHelper db = new JdbcHelper(config.jdbcUrl(), config.jdbcUsername(), config.jdbcPassword());
+            JdbcHelper db = new JdbcHelper(config.jdbcUrl(), config.jdbcUsername(), config.jdbcPassword(),
+                    config.jdbcDriver());
             // 表1 不做任何回退：未完成（pending）的单元下次启动会被重新解析，表4 记录错误详情即可
             ErrorRecord er = new ErrorRecord();
             er.setPhase(e.phase);

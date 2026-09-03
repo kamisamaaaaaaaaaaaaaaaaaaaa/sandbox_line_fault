@@ -25,6 +25,7 @@ import java.util.zip.ZipInputStream;
  * 返回 sink 则开始流式解析该类内容（方法逐条 push，由调用方按批写库）；
  * 返回 null 则跳过该单元的内容解析（用于"已解析过"的快速跳过，省去 ASM 开销）。
  * 每个单元输出类-方法明细（方法名 + 描述符），排除 &lt;clinit&gt; 与 synthetic（lambda 除外）。
+ * &lt;clinit&gt; 排除原因见 {@link #parseClass}：sandbox 侧硬编码不支持，收录无收益。
  */
 public final class BootJarParser {
 
@@ -104,7 +105,9 @@ public final class BootJarParser {
 
     /**
      * ASM 解析单个 class：收集全部可注入方法，逐条 push 给 sink。
-     * 排除 &lt;clinit&gt;；synthetic 方法仅纳入 lambda（lambda$ 前缀，其体内为用户逻辑），
+     * 排除 &lt;clinit&gt;（sandbox 在类结构收集阶段即硬编码排除它，收录也无法织入，
+     * 只会制造永不命中的覆盖率盲区——已用独立应用实测确认）；
+     * synthetic 方法仅纳入 lambda（lambda$ 前缀，其体内为用户逻辑），
      * 其余 synthetic（bridge/access$ 转发）排除以避免重复命中。
      */
     private static void parseClass(InputStream in, final String entryName, final UnitSink sink) {
@@ -117,6 +120,10 @@ public final class BootJarParser {
                                                  String signature, String[] exceptions) {
                     boolean synthetic = (access & Opcodes.ACC_SYNTHETIC) != 0;
                     boolean isLambda = synthetic && name.startsWith("lambda$");
+                    // <clinit> 不入库：sandbox 在类结构收集阶段即硬编码排除它
+                    //（ClassStructureImplByAsm$5$1.visitMethod：StringUtils.equals("<clinit>", name) 直接放行、
+                    // 不收集为 BehaviorStructure）→ 它进不了 signCodes，织入器永不改写。
+                    // 收录它只会让表2 多出一批永不命中的行，制造覆盖率盲区（已实测确认）。
                     if ("<clinit>".equals(name)) {
                         return null;
                     }

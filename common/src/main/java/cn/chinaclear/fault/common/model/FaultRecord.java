@@ -20,6 +20,8 @@ public class FaultRecord {
     private String methodName;
     private int lineNo;
     private String threadName;
+    /** 该行该线程本轮的第几次故障（从 1 开始），上限由 inject.fault.times 决定 */
+    private int faultSeq;
     private String faultType;
     private Date occurredAt;
 }

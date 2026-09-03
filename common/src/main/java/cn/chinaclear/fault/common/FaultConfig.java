@@ -147,6 +147,14 @@ public final class FaultConfig {
         return require("jdbc.password");
     }
 
+    /**
+     * 故障库 JDBC 驱动类名（必填）：换数据库时改为目标库驱动（如 org.postgresql.Driver），
+     * 加载失败直接硬保护，无内置驱动兜底。完整换库步骤见 README 的"更换数据库"章节。
+     */
+    public String jdbcDriver() {
+        return require("jdbc.driver");
+    }
+
     /** BOOT-INF/lib 白名单：正则表达式（对 jar 文件名全串匹配），YAML 列表一行一个（兼容逗号分隔） */
     public List<String> libWhitelist() {
         return getList("lib.whitelist");
@@ -178,6 +186,15 @@ public final class FaultConfig {
     }
 
     /**
+     * 注入名单：方法正则，对 "完全限定类名.方法名" 全串匹配，YAML 列表一行一个（兼容逗号分隔）。
+     * 未配置 = 所有已解析方法都是注入候选；配置 = 只有命中的方法进入候选（再经 exclude.methods 排除）。
+     * 注入某个类的所有方法写 "全限定类名\..*"，例如 cn\.demo\.OrderService\..*
+     */
+    public List<String> includeMethods() {
+        return getList("inject.include.methods");
+    }
+
+    /**
      * 注入排除：方法正则，对 "完全限定类名.方法名" 全串匹配，YAML 列表一行一个（兼容逗号分隔），命中的方法不注入。
      * 排除某个类的所有方法写 "全限定类名\..*"，例如 cn\.demo\.OrderService\..*
      */
@@ -193,6 +210,20 @@ public final class FaultConfig {
     /** 模块侧分批读取方法清单的批大小（防大项目一次性读入打爆内存） */
     public int injectBatchSize() {
         return getInt("inject.batch.size", 5000);
+    }
+
+    /**
+     * 每行每线程故障次数：同一行在同一线程下本轮最多发生故障的次数（>=1）。
+     * 该行被 T 个线程执行时，本轮最多发生 T × N 次故障。
+     * 未配置时默认值 1——即每行每线程本轮只发生一次故障。填入小于 1 的值即硬保护。
+     */
+    public int faultTimes() {
+        int v = getInt("inject.fault.times", 1);
+        if (v < 1) {
+            throw new IllegalStateException("invalid config: inject.fault.times must be >= 1, actual: "
+                    + get("inject.fault.times", ""));
+        }
+        return v;
     }
 
     /** 必填配置缺失即抛错（走硬保护，避免带错误配置运行） */

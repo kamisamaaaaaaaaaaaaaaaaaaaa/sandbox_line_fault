@@ -1,0 +1,36 @@
+// ============================================================
+// 统一仓库配置（全工程仓库的唯一定义处）
+//
+// 【部署到内网时】只改本文件的 mavenRepositories 闭包：
+//   1. 注释掉 handler.mavenCentral()
+//   2. 取消注释并填写内网私服地址
+//   3. 若私服是 http（非 https），必须加 allowInsecureProtocol = true
+//      若私服需要认证，加 credentials { ... }
+//
+// 本文件由 settings.gradle 加载，并挂到 gradle.ext 供以下位置调用：
+//   - 根 build.gradle 的 buildscript（解析 shadow 插件）
+//   - 根 build.gradle 的 allprojects（各模块依赖解析）
+// ============================================================
+ext.mavenRepositories = { RepositoryHandler handler ->
+    // 外网默认仓库
+    handler.mavenCentral()
+
+    // ---- 内网私服示例（部署到内网时启用并改成实际地址）----
+    // handler.maven { url 'http://nexus.intranet/repository/maven-public/' }
+
+    // 私服为 http 时需显式允许不安全协议：
+    // handler.maven {
+    //     allowInsecureProtocol = true
+    //     url 'http://nexus.intranet/repository/maven-public/'
+    // }
+
+    // 需要认证的私服：
+    // handler.maven {
+    //     url 'http://nexus.intranet/repository/maven-public/'
+    //     allowInsecureProtocol = true
+    //     credentials {
+    //         username = 'your-username'
+    //         password = 'your-password'
+    //     }
+    // }
+}

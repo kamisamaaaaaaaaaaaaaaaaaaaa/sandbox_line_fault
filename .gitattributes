@@ -1,0 +1,10 @@
+# Shell 脚本在 Linux 上执行，必须保持 LF 行尾
+# （若被转成 CRLF，shebang 行带 CR 会导致 "/bin/bash^M: bad interpreter"）
+*.sh text eol=lf
+
+# 其余文本文件按 Git 默认处理
+*.java text
+*.gradle text
+*.md text
+*.sql text
+*.yml text

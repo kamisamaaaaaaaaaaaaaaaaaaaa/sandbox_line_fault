@@ -17,8 +17,8 @@ public final class ClassMethodDao {
     }
 
     /**
-     * 批量裸 INSERT（uk(unit_id,class,method,desc)）：约束冲突批自动降级逐行（冲突行跳过、其他错误上抛硬保护），
-     * 幂等收敛语义与原 INSERT IGNORE 一致，但非冲突 SQL 错误不再被静默吞掉。
+     * 批量裸 INSERT（uk(unit_id,class,method,desc)）：逐行独立提交（防多节点并发解析死锁），
+     * 冲突行跳过、其他错误上抛硬保护；部分写入为合法中间态（唯一索引幂等，重解析自动补齐）。
      */
     public void batchInsertSkipConflict(long unitId, List<ClassMethodInfo> methods) {
         if (methods == null || methods.isEmpty()) {

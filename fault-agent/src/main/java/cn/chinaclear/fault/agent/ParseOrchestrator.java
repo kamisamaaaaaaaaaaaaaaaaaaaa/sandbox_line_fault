@@ -20,9 +20,9 @@ import java.util.Set;
 /**
  * 解析编排：流式解析 bootJar → 单元登记与跳过判定 → 表2 分批幂等落库 → 单元 id 列表（供挂载命令传参）。
  *
- * 两态模型（无抢占、无等待）：
+ * 两态模型（各节点独立解析，无协调）：
  *  completed = 已完成，跳过该单元的内容解析；任何其他状态 = 未完成，流式解析并按批写库。
- * 多节点同时解析同一单元属预期行为：表2 唯一索引 + INSERT IGNORE 幂等收敛；
+ * 多节点同时解析同一单元属预期行为：表2 唯一索引 + 裸 INSERT 冲突跳过（SQLState 23 类）幂等收敛；
  * 表1 由最后完成的节点覆盖（ip/机器名/计数/parsed_at 为观测信息，不参与决策）。
  *
  * 内存控制：解析出的方法按 parse.batch.size 分批写库，不驻留全量方法清单。
@@ -34,7 +34,8 @@ final class ParseOrchestrator {
 
     /** 返回全部解析单元对应的表1 主键 id 列表 */
     static List<Long> parseAndStore(FaultConfig config, String bootJarPath, long deadline) {
-        JdbcHelper db = new JdbcHelper(config.jdbcUrl(), config.jdbcUsername(), config.jdbcPassword());
+        JdbcHelper db = new JdbcHelper(config.jdbcUrl(), config.jdbcUsername(), config.jdbcPassword(),
+                config.jdbcDriver());
         JarRecordDao recordDao = new JarRecordDao(db);
         ClassMethodDao methodDao = new ClassMethodDao(db);
         int batchSize = config.parseBatchSize();
@@ -64,7 +65,7 @@ final class ParseOrchestrator {
         return unitIds;
     }
 
-    /** 表1 登记：INSERT IGNORE 占位拿 id；已存在则读取状态判定是否已完成 */
+    /** 表1 登记：裸 INSERT 占位拿 id（冲突返回 null）；已存在则读取状态判定是否已完成 */
     private static UnitRegistration registerUnit(JarRecordDao recordDao, String unitType, String sha256,
                                                  String sourceJar, String bootJarPath) {
         try {

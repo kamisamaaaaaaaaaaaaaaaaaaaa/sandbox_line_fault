@@ -1,42 +1,57 @@
 # fault-agent 配置（YAML，可被 -javaagent:fault-agent.jar=k1=v1,k2=v2 覆盖）
 # 应用必须以 -jar 方式启动（bootJar 自动从启动参数定位）
+#
+# 本文件只保留**必填项**；有默认值的配置一律注释，按需取消注释并修改（用法见各条注释）。
+# 完整说明见 README「三、配置说明」。
 
 jdbc:
   # 故障库连接串（必填）
   url: jdbc:mysql://192.168.193.1:3306/fault_sandbox?useUnicode=true&characterEncoding=utf8&useSSL=false&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true&connectTimeout=5000&socketTimeout=10000
   username: root
   password: root123
+  # JDBC 驱动类名（必填，无内置兜底，加载失败即硬保护 kill）
+  # **agent 侧必须填 relocate 后的类名**：agent fat jar 内的第三方依赖已被 shadow relocate
+  # （规则见 fault-agent/build.gradle），jar 中不存在原包名的驱动类
+  # 换数据库时改这一项，完整步骤见 README「更换数据库」
+  driver: cn.chinaclear.fault.shaded.mysql.cj.jdbc.Driver
 
-lib:
-  # BOOT-INF/lib 第三方白名单：正则表达式（对 jar 文件名全串匹配），一行一个（"- " 开头）
-  # 正则中的 . 是通配符，表示字面量点请写 \.（不转义也能匹配，但会放宽，如 foo-1.0.jar 会匹配 foo-1x0yjar）
-  # 留空列表（whitelist: []）= 不解析任何 lib
-  whitelist:
-    - test-lib.*
-    # - biz-.*-common\.jar
-    # - biz-dao-1\.0\.0\.jar
-
-mount:
-  # 是否挂载故障模块：true=解析后自动挂载并注入故障；false=纯解析模式（只落库，应用正常启动不注入）
-  enabled: true
-
+# sandbox 工具安装目录（挂载脚本位于其 bin/sandbox.sh）
+# 无默认值：mount.enabled=true 时必填，缺失在解析开始前即硬保护
 sandbox:
-  # sandbox 工具安装目录（挂载脚本位于其 bin/sandbox.sh）
   home: /home/lys/sandbox
 
-premain:
-  # 解析阶段超时（定位 bootJar 后的解析+落库，含异机 pending 等待），毫秒，默认 900000（15 分钟）
-  parse:
-    timeout:
-      ms: 900000
-  # 挂载阶段超时（sandbox attach + 模块 inject + watch 注册），毫秒，独立计时，默认 1200000（20 分钟）
-  mount:
-    timeout:
-      ms: 1200000
-  # 解析结果分批写库的批大小（流式解析，方法不驻留内存），默认 2000
-  batch:
-    size: 2000
+# ========== 以下均为可选配置（有默认值），按需取消注释并修改 ==========
 
-log:
-  # 日志目录（相对路径基于目标进程工作目录；也可设为绝对路径如 /var/log/fault）
-  dir: logs
+# lib:
+#   # BOOT-INF/lib 第三方白名单：正则表达式（对 jar 文件名全串匹配），一行一个（"- " 开头）
+#   # 默认值：空列表 = 不解析任何 lib（只解析 BOOT-INF/classes/）
+#   # 正则中的 . 是通配符，表示字面量点请写 \.
+#   whitelist:
+#     - test-lib.*
+
+# mount:
+#   # 是否挂载故障模块：true = 解析后自动挂载并注入故障
+#   #                 false = 纯解析模式（只落库，应用正常启动，不挂载不注入）
+#   # 默认值：true
+#   enabled: true
+
+# premain:
+#   # 解析阶段超时（定位 bootJar 后的登记+解析+落库，含异机 pending 等待），毫秒
+#   # 默认值：900000（15 分钟）
+#   parse:
+#     timeout:
+#       ms: 900000
+#   # 挂载阶段超时（sandbox attach + 模块 inject + watch 注册），毫秒，与解析阶段各自独立计时
+#   # 默认值：1200000（20 分钟）
+#   mount:
+#     timeout:
+#       ms: 1200000
+#   # 解析结果分批写库的批大小（流式解析，方法不驻留内存）
+#   # 默认值：2000；大项目内存敏感可下调（如 500）
+#   batch:
+#     size: 2000
+
+# log:
+#   # 日志目录（相对路径基于目标进程工作目录，也可设绝对路径如 /var/log/fault）
+#   # 默认值：logs
+#   dir: logs

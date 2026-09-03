@@ -49,9 +49,10 @@ CREATE TABLE IF NOT EXISTS t_fault_record (
   method_name   VARCHAR(128) NOT NULL,
   line_no       INT          NOT NULL,
   thread_name   VARCHAR(128) NOT NULL,
+  fault_seq     INT          NOT NULL COMMENT '该行该线程本轮的第几次故障（从 1 开始，上限由 inject.fault.times 决定）',
   fault_type    VARCHAR(32)  NOT NULL DEFAULT 'KILL_PROCESS',
   occurred_at   DATETIME     NOT NULL,
-  UNIQUE KEY uk_hit_node (tag, boot_jar_hash, class_name, method_name, line_no)
+  UNIQUE KEY uk_hit_node (tag, boot_jar_hash, class_name, method_name, line_no, thread_name, fault_seq)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 -- 表4：agent 自身错误记录（写入后进程将被 kill）

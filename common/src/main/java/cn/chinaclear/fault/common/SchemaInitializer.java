@@ -1,7 +1,6 @@
 package cn.chinaclear.fault.common;
 
 import java.sql.Connection;
-import java.sql.DriverManager;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
@@ -20,14 +19,17 @@ public final class SchemaInitializer {
     }
 
     public static void checkTables(FaultConfig config) {
-        JdbcHelper.ensureDriver();
-        String url = config.jdbcUrl();
-        try (Connection conn = DriverManager.getConnection(url, config.jdbcUsername(), config.jdbcPassword());
+        try (Connection conn = new JdbcHelper(config.jdbcUrl(), config.jdbcUsername(), config.jdbcPassword(),
+                config.jdbcDriver()).open();
              Statement st = conn.createStatement()) {
             for (String table : REQUIRED_TABLES) {
                 ResultSet rs = st.executeQuery("SELECT 1 FROM " + table + " LIMIT 1");
                 rs.close();
             }
+            // 列级校验：表存在但缺列时，写入会在运行期抛 Unknown column（非 23 类错误），
+            // 表现为进程被硬保护 kill 且原因不直观，故在建表校验阶段就明确拦下
+            ResultSet rs = st.executeQuery("SELECT fault_seq FROM t_fault_record LIMIT 1");
+            rs.close();
         } catch (SQLException e) {
             throw new IllegalStateException(
                     "fault_sandbox schema not ready (run common/src/main/resources/schema.sql manually): "
