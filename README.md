@@ -69,15 +69,17 @@ gradlew.bat :fault-agent:shadowJar :fault-module:shadowJar
 
 ### 依赖仓库配置（内网部署）
 
-全工程的 Maven 仓库**唯一定义在 [`gradle/repositories.gradle`](gradle/repositories.gradle)**，默认使用 `mavenCentral()`。构建脚本里各处的 `repositories` 都调用同一份配置，插件也一律通过 `buildscript` 的 `classpath` 引入（不使用 `plugins {}` DSL），因此插件与依赖走同一套仓库，不会出现插件单独指向外网解析失败的情况。
+默认使用 `mavenCentral()`。插件一律通过 `buildscript` 的 `classpath` 引入（不使用 `plugins {}` DSL）；仓库声明与常见 Gradle 工程一致——插件仓库写在 `buildscript` 块内，普通依赖仓库写在 `repositories` 块内。
 
-部署到内网时，**只改 `gradle/repositories.gradle` 一处**：注释掉 `handler.mavenCentral()`，启用并填写内网私服地址即可。该文件内已备好可直接取消注释的模板（含 http 私服必需的 `allowInsecureProtocol`、认证凭据写法）。
+部署到内网时，仓库声明共 **3 处**需要改动（均已备好内网私服注释模板，取消注释、填入私服地址即可）：
 
-| 文件 | 作用 |
+| 位置 | 作用 |
 |---|---|
-| `gradle/repositories.gradle` | **仓库唯一定义处**（内网部署只改这里） |
-| `settings.gradle` | 加载上述配置并挂到 `gradle.ext`，供各构建脚本调用 |
-| `build.gradle`（根） | `buildscript` 解析 shadow 插件；`allprojects` 解析各模块依赖 |
+| `build.gradle`（根）`buildscript.repositories` | shadow 插件的解析仓库 |
+| `build.gradle`（根）`allprojects.repositories` | 各模块普通依赖的解析仓库 |
+| `stress-app/build.gradle` `buildscript.repositories` | spring-boot 插件的解析仓库（stress-app 为本机验证载荷） |
+
+私服为 http（非 https）时必须加 `allowInsecureProtocol = true`；需要认证时加 `credentials { ... }`。3 处模板内容相同，部署时同步启用。
 
 > `test-app` / `test-lib`（验证用 Spring Boot 应用与白名单 lib）与 `scripts/`（部署辅助脚本）为**本机验证资源，未纳入 git**；`git clone` 后如需跑验证用例，需自行准备或从既有环境获取。`settings.gradle` 仍引用这两个模块，缺失时用上面的命令只构建部署产物即可。
 

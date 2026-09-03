@@ -1,12 +1,24 @@
 // 根构建脚本
 //
-// 仓库统一在 gradle/repositories.gradle 定义，由 settings.gradle 挂到 gradle.ext.mavenRepositories。
 // 插件一律通过 buildscript 的 classpath 引入，不使用 plugins {} DSL——
 // 这样内网环境下插件与依赖走同一套仓库，不会出现插件单独指向外网的问题。
+//
+// 【部署到内网时】仓库声明共 3 处需要改动：本文件的 buildscript 与 allprojects，
+// 以及 stress-app/build.gradle 的 buildscript。各处均已备好内网私服注释模板。
 
 buildscript {
     repositories {
-        gradle.ext.mavenRepositories(it)
+        mavenCentral()
+
+        // ---- 内网私服模板（部署时取消注释并改成实际地址）----
+        // maven {
+        //     url 'http://nexus.intranet/repository/maven-public/'
+        //     allowInsecureProtocol = true          // 私服为 http（非 https）时必须
+        //     credentials {
+        //         username = 'your-username'
+        //         password = 'your-password'
+        //     }
+        // }
     }
     dependencies {
         classpath 'com.gradleup.shadow:com.gradleup.shadow.gradle.plugin:9.4.3'
@@ -19,7 +31,17 @@ allprojects {
     version = '1.0.0'
 
     repositories {
-        gradle.ext.mavenRepositories(it)
+        mavenCentral()
+
+        // ---- 内网私服模板（与 buildscript 中的一致，部署时同步启用）----
+        // maven {
+        //     url 'http://nexus.intranet/repository/maven-public/'
+        //     allowInsecureProtocol = true
+        //     credentials {
+        //         username = 'your-username'
+        //         password = 'your-password'
+        //     }
+        // }
     }
 }
 

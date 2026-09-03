@@ -1,7 +1,2 @@
 rootProject.name = 'fault-sandbox'
 include 'common', 'fault-agent', 'fault-module', 'test-lib', 'test-app', 'stress-app'
-
-// 加载统一仓库配置，并挂到 gradle.ext 供各 build.gradle 的 buildscript / repositories 调用。
-// 【部署到内网时】改 gradle/repositories.gradle 即可，本文件无需改动。
-apply from: 'gradle/repositories.gradle'
-gradle.ext.mavenRepositories = ext.mavenRepositories
