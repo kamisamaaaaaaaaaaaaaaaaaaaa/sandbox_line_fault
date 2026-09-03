@@ -42,14 +42,14 @@
 
 - 操作：TC3 后重启应用，再次请求同一接口
 - 命令预期：应用存活（同一行 DuplicateKey 放行），业务正常返回
-- 数据库预期：同一「行+线程」的故障次数未达 `inject.fault.times` 前会继续新增（`fault_seq` 递增），达到上限后不再新增；若命中其他未触发行则新增 `fault_seq=1` 且进程死
+- 数据库预期：同一「行+线程+调用栈」的故障次数未达 `inject.fault.times` 前会继续新增（`fault_seq` 递增），达到上限后不再新增；若命中其他未触发行则新增 `fault_seq=1` 且进程死
 - 结果：☐ 通过 ☐ 失败
 
 ## TC5 多节点并发
 
 - 操作：两个 test-app 实例（不同端口）同时启动并同时请求 create
 - 命令预期：仅一个实例死（另一个存活或因其他行死亡）
-- 数据库预期：t_jar_record 无重复行（uk(sha256) 登记），两个实例可能各自解析同一单元（幂等收敛），最终 completed；同一「行+线程+第几次」组合 t_fault_record 仅一条（另一实例冲突放行）
+- 数据库预期：t_jar_record 无重复行（uk(sha256) 登记），两个实例可能各自解析同一单元（幂等收敛），最终 completed；同一「行+线程+调用栈+第几次」组合 t_fault_record 仅一条（另一实例冲突放行）
 - 结果：☐ 通过 ☐ 失败
 
 ## TC6 未完成时重新解析
@@ -90,14 +90,14 @@
 
 ## 每行每线程多次故障（F 系列）
 
-> 语义：判重键含 `thread_name` 与 `fault_seq`。同一行在同一线程下本轮最多发生 `inject.fault.times`（记为 N，未配置时默认 1）次故障；该行被 T 个线程执行时本轮最多 T × N 次。
+> 语义：判重键含 `thread_name`、`fault_seq` 与 `stack_hash`。同一行在同一线程、经同一调用栈执行时本轮最多发生 `inject.fault.times`（记为 N，未配置时默认 1）次故障；该行被 T 个线程、S 种调用栈执行时本轮最多 T × S × N 次。
 > 为控制时长，验证用 `inject.include.methods` 只注入少量方法——验证目标是机制正确性（seq 连续、各线程独立计数、用尽后零撞库），不是覆盖率。
 
 | # | 用例 | 预期 | 结果 |
 | --- | --- | --- | --- |
 | F1 | 单进程、N=3、`inject.include.methods` 限定单个方法，跑至稳定 | 该方法每行的每个线程最终 3 条记录，`fault_seq` = 1,2,3；表3 中无其他方法的记录 | ☐ 通过 ☐ 失败 |
 | F2 | 按「行+线程」核对：每个组合 `cnt=3`、`min(fault_seq)=1`、`max(fault_seq)=3` 且 `cnt=max` | 无缺号、无重复、无超额 | ☐ 通过 ☐ 失败 |
-| F3 | 线程维度独立性：同一行被 4 个线程执行 | 该行共 4 × 3 = 12 条，`(thread_name, fault_seq)` 组合唯一 | ☐ 通过 ☐ 失败 |
+| F3 | 线程维度独立性：同一行被 4 个线程执行 | 该行共 4 × 3 = 12 条，`(thread_name, fault_seq, stack_hash)` 组合唯一 | ☐ 通过 ☐ 失败 |
 | F4 | 用尽后零撞库：跑满后继续运行一段时间 | 表3 不再新增记录；模块日志不再出现该行的 `fault seq already preempted` | ☐ 通过 ☐ 失败 |
 | F5 | N=1 对照（其余配置不变，仅改 `inject.fault.times: 1`） | 退化成改造前的行为：每行每线程仅 1 条 | ☐ 通过 ☐ 失败 |
 | F6 | 默认值：不配置 `inject.fault.times`（默认 1） | 每行每线程仅 1 条记录，行为与改造前一致 | ☐ 通过 ☐ 失败 |
@@ -116,6 +116,21 @@ ORDER BY class_name, method_name, line_no, thread_name;
 ```
 
 **区分「未跑满」的性质**：线程跑满 N 次需跨多个进程生命周期累计执行该行约 `1+2+…+N` 次（每次 kill 后新进程计数归零，靠冲突逐次推进）。低频线程暂未跑满属正常，继续运行会补齐；出现 `fault_seq` 缺号，或执行次数已远超 `N(N+1)/2` 仍未跑满，则为计数缺陷。
+
+## 调用栈判重（C 系列，2026-09-03 追加验证）
+
+> 语义：表3 增加 `stack_hash`（`MD5(stack_text)` 32 位 hex，入唯一索引）与 `stack_text`（调用栈原文，MEDIUMTEXT）；
+> 判重键 = 轮次 + 应用部署路径 + 行 + 线程 + 调用栈 + 第几次故障，配额按「行+线程+调用栈」独立推进。
+> 故障命中（赢得抢占）后 kill 前打印完整调用栈并随记录落库，两者内容同源。
+
+| # | 用例 | 结果 | 备注 |
+| --- | --- | --- | --- |
+| C1 | kill 前打印调用栈并落库（tag=cs-v1） | ✅ | 日志 `FAULT HIT ... stackHash=...` 换行接 `call stack (N frames):` 逐帧输出；表3 `stack_hash` 与日志一致、`stack_text` 完整（603 字符），命中后 kill 生效 |
+| C2 | 栈裁剪：栈顶工具帧不落栈（取栈入口 / Spy 探针 / sandbox 事件分发 / 本模块回调） | ✅ | cs-v1 轮发现 Spy 探针帧真实包名为 `java.com.alibaba.jvm.sandbox.spy.Spy`（带 java. 前缀）未被裁掉；补裁剪前缀后 cs-v2 轮栈首帧 = 故障行自身，8 帧全业务帧 |
+| C3 | fault_seq 推进 + 线程维度 + 调用栈维度独立计数（tag=cs-v3，`inject.fault.times=2`，include 限 method0/method1） | ✅ | 408 条 = method0 272（17 行 × 4 线程 × 2 栈 × 2 次）+ method1 136（17 × 4 × 1 × 2）；每个 (行,线程,栈) 组合恰 2 条、`fault_seq` ∈ {1,2} 无缺号（违规组合 0）；method0 每行 2 种 stack_hash × 4 线程；4 个 worker 线程全部出现，同一行不同线程可走不同调用路径 |
+| C4 | 饱和判据 | ✅ | 225 个进程周期产生 408 次命中（4 线程在 kill 生效前并发命中，~1.65 条/周期）；跑满后命中停止、进程稳定存活 |
+
+载荷说明：stress-app 重新生成（`gen-stress.ps1 -Methods 8 -SeqLines 5 -BranchLines 2 -Threads 4`），并把 `run()` 取模域扩为 `% (METHOD_COUNT + 4)`，使 else 兜底分支（同样调用 method0）真实可达——method0 因此拥有两条调用路径（`run:21` / `run:37` 两个调用点行号），用于构造「同一行不同调用栈」场景。
 
 ## 执行记录
 
@@ -141,5 +156,5 @@ ORDER BY class_name, method_name, line_no, thread_name;
 
 > 环境备注：Linux OpenJDK 21 下 `getInputArguments()` 不含 `-jar`（JDK9+ 行为），bootJar 定位链为 sun.java.command → /proc/self/cmdline → inputArguments 三级（均失败则硬保护 kill，无配置兜底）；sandbox.sh 需以其 bin 目录为工作目录执行（SANDBOX_HOME_DIR=${PWD}/..）。
 >
-> 轮次说明：操作者在目标应用 JVM 参数加 `-Dfault.tag=<轮次标识>`；模块 inject 时读取，缺失则直接 kill 进程（表4 留痕）。判重唯一索引 `uk(tag, boot_jar_hash, class_name, method_name, line_no, thread_name, fault_seq)`（判重键 = 轮次 + 应用部署路径 + 行 + 线程 + 第几次故障；`ip` 不参与判重）——新 tag 开始所有行重新可注入。
+> 轮次说明：操作者在目标应用 JVM 参数加 `-Dfault.tag=<轮次标识>`；模块 inject 时读取，缺失则直接 kill 进程（表4 留痕）。判重唯一索引 `uk(tag, boot_jar_hash, class_name, method_name, line_no, thread_name, fault_seq, stack_hash)`（判重键 = 轮次 + 应用部署路径 + 行 + 线程 + 调用栈 + 第几次故障；`ip` 不参与判重）——新 tag 开始所有行重新可注入。
 

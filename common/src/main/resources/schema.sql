@@ -34,7 +34,7 @@ CREATE TABLE IF NOT EXISTS t_class_method (
   UNIQUE KEY uk_method (unit_id, class_name, method_name, method_desc)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
--- 表3：故障注入记录（判重键 = tag + bootJar 部署路径 + 类 + 方法 + 行：
+-- 表3：故障注入记录（判重键 = tag + bootJar 部署路径 + 类 + 方法 + 行 + 线程 + 调用栈 + 第几次故障：
 --   部署路径即应用标识——同路径 = 同一应用的集群（集群级只 kill 一个节点）；
 --   不同路径 = 不同应用（即使同机、jar 内容相同），各自独立抢占独立 kill）
 CREATE TABLE IF NOT EXISTS t_fault_record (
@@ -49,11 +49,25 @@ CREATE TABLE IF NOT EXISTS t_fault_record (
   method_name   VARCHAR(128) NOT NULL,
   line_no       INT          NOT NULL,
   thread_name   VARCHAR(128) NOT NULL,
-  fault_seq     INT          NOT NULL COMMENT '该行该线程本轮的第几次故障（从 1 开始，上限由 inject.fault.times 决定）',
+  fault_seq     INT          NOT NULL COMMENT '该行该线程该调用栈本轮的第几次故障（从 1 开始，上限由 inject.fault.times 决定）',
+  stack_hash    CHAR(32)     NOT NULL DEFAULT '' COMMENT '调用栈摘要：MD5(stack_text) 32 位小写 hex（判重键组成部分；原文超长无法入索引）',
+  stack_text    MEDIUMTEXT   NULL COMMENT '触发故障时的调用栈：已裁剪取栈入口/sandbox/本模块帧，帧格式「类.方法(文件:行)」，换行分隔',
   fault_type    VARCHAR(32)  NOT NULL DEFAULT 'KILL_PROCESS',
   occurred_at   DATETIME     NOT NULL,
-  UNIQUE KEY uk_hit_node (tag, boot_jar_hash, class_name, method_name, line_no, thread_name, fault_seq)
+  UNIQUE KEY uk_hit_node (tag, boot_jar_hash, class_name, method_name, line_no, thread_name, fault_seq, stack_hash)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- =====================================================================
+-- 已有库升级：为 t_fault_record 增加调用栈两列并细化唯一键
+-- 适用场景：本文件此前已执行过、t_fault_record 已存在且已有数据的库。
+-- 存量记录 stack_hash 统一为 ''，仍满足新唯一键——原唯一键已保证前 7 列组合唯一，
+-- 追加一列后不会与存量数据冲突。执行前建议备份该表。
+-- =====================================================================
+-- ALTER TABLE t_fault_record
+--   ADD COLUMN stack_hash CHAR(32) NOT NULL DEFAULT '' COMMENT '调用栈摘要：MD5(stack_text) 32 位小写 hex（判重键组成部分）' AFTER fault_seq,
+--   ADD COLUMN stack_text MEDIUMTEXT NULL COMMENT '触发故障时的调用栈' AFTER stack_hash,
+--   DROP INDEX uk_hit_node,
+--   ADD UNIQUE KEY uk_hit_node (tag, boot_jar_hash, class_name, method_name, line_no, thread_name, fault_seq, stack_hash);
 
 -- 表4：agent 自身错误记录（写入后进程将被 kill）
 CREATE TABLE IF NOT EXISTS t_error_record (

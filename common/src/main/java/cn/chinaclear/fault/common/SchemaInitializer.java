@@ -28,7 +28,8 @@ public final class SchemaInitializer {
             }
             // 列级校验：表存在但缺列时，写入会在运行期抛 Unknown column（非 23 类错误），
             // 表现为进程被硬保护 kill 且原因不直观，故在建表校验阶段就明确拦下
-            ResultSet rs = st.executeQuery("SELECT fault_seq FROM t_fault_record LIMIT 1");
+            ResultSet rs = st.executeQuery(
+                    "SELECT fault_seq, stack_hash, stack_text FROM t_fault_record LIMIT 1");
             rs.close();
         } catch (SQLException e) {
             throw new IllegalStateException(

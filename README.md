@@ -34,7 +34,7 @@
 |---|---|
 | 自动发现 | 不侵入应用代码，启动时自动解析 bootJar 得到全部用户类与方法 |
 | 自动挂载 | 无需人工干预，应用启动过程中自动完成 sandbox 模块挂载 |
-| 行级注入 | 任意用户代码行执行到时触发 kill；每行每线程本轮最多 `inject.fault.times` 次（可配置），同一「行+线程+第几次」在集群内最多死一个节点 |
+| 行级注入 | 任意用户代码行执行到时触发 kill；每行每线程每调用栈本轮最多 `inject.fault.times` 次（可配置），同一「行+线程+调用栈+第几次」在集群内最多死一个节点 |
 | 硬保护 | 工具自身故障时，宁可杀掉进程也绝不让应用在无保护状态下运行 |
 
 ### 1.2 交付物
@@ -99,7 +99,21 @@ java -Dfault.tag=round-001 \
      -jar /home/lys/your-app.jar
 ```
 
-启动后自动完成：解析 bootJar → 结果入库 → 挂载故障模块 → 应用继续启动 → **任一用户代码行执行到时（该行该线程本轮故障次数未用尽）进程被 kill -9，故障详情写入 `t_fault_record`**。
+启动后自动完成：解析 bootJar → 结果入库 → 挂载故障模块 → 应用继续启动 → **任一用户代码行执行到时（该行该线程该调用栈本轮故障次数未用尽）进程被 kill -9，故障详情（含调用栈）写入 `t_fault_record`**。
+
+### 3.1 已有库升级
+
+`schema.sql` 以 `CREATE TABLE IF NOT EXISTS` 编写，对**已存在的表不会做任何修改**。表结构变更需手工执行变更语句，语句集中附在 `schema.sql` 文件末尾的「已有库升级」段落：
+
+```bash
+# 第 1 步：备份待变更的表
+mysqldump --host=<数据库地址> --user=root -p fault_sandbox t_fault_record > t_fault_record_bak.sql
+
+# 第 2 步：执行 schema.sql 末尾「已有库升级」段落中对应的 ALTER 语句
+mysql --host=<数据库地址> --user=root -p fault_sandbox
+```
+
+agent 启动时只校验表与列是否存在，**不会自动建表或加列**；缺列会在启动阶段即硬保护 kill，因此升级必须先于部署新版本 jar 完成。
 
 ---
 
@@ -147,7 +161,7 @@ java -Dfault.tag=round-001 \
 | `jdbc.username` | 是 | — | 数据库用户 |
 | `jdbc.password` | 是 | — | 数据库密码 |
 | `jdbc.driver` | 是 | — | **JDBC 驱动类名，填驱动的标准类名**（如 `com.mysql.cj.jdbc.Driver`）。模块 jar 未做 relocate。无内置兜底 |
-| `inject.fault.times` | 否 | **`1`** | **每行每线程故障次数**（≥1）。同一行在同一线程下本轮最多发生多少次故障；该行被 T 个线程执行时本轮最多 T × N 次。填入 <1 的值即硬保护 |
+| `inject.fault.times` | 否 | **`1`** | **每行每线程每调用栈故障次数**（≥1）。同一行在同一线程、经同一调用栈执行时本轮最多发生多少次故障；该行被 T 个线程、S 种调用栈执行时本轮最多 T × S × N 次。填入 <1 的值即硬保护 |
 | `inject.batch.size` | 否 | **`5000`** | 分批读取方法清单的批大小（避免大项目一次性读入打爆内存） |
 | `inject.include.methods` | 否 | **空列表**（所有已解析方法都是注入候选） | 注入名单，方法正则，见 [5.5](#55-注入名单与排除名单) |
 | `exclude.methods` | 否 | **空列表**（不排除任何方法） | 注入排除，方法正则，见 [5.5](#55-注入名单与排除名单) |
@@ -190,9 +204,24 @@ java -Dfault.tag=round-001 \
 | 3 | 建表 DDL | `common/src/main/resources/schema.sql` | 4 张表按目标库方言改写（类型、自增主键、唯一索引） |
 | 4 | 驱动依赖 | `common/build.gradle` | 加入目标库驱动依赖；若该驱动会打进 agent fat jar，需在 `fault-agent/build.gradle` 增加对应 relocate 规则 |
 
+MySQL → PostgreSQL 的类型映射（`schema.sql` 为 MySQL 方言）：
+
+| MySQL | PostgreSQL | 涉及对象 |
+|---|---|---|
+| `BIGINT AUTO_INCREMENT` | `BIGSERIAL` | 4 张表主键，需 `getGeneratedKeys()` 可用 |
+| `DATETIME` / `DATETIME DEFAULT CURRENT_TIMESTAMP` | `TIMESTAMP` / `TIMESTAMP DEFAULT CURRENT_TIMESTAMP` | 表1 `parsed_at` / `updated_at`、表3 `occurred_at`、表4 `created_at` |
+| `CHAR(n)` | `VARCHAR(n)` | 表1 `sha256`、表3 `boot_jar_hash` / `stack_hash`（PG 的 `CHAR(n)` 会空格填充） |
+| `MEDIUMTEXT` | `TEXT` | 表3 `stack_text`（PG 无 MEDIUMTEXT，TEXT 无长度上限） |
+| `INT` | `INTEGER` | 表1 `class_count` / `method_count`、表3 `line_no` / `fault_seq` |
+| `ENGINE=InnoDB DEFAULT CHARSET=utf8mb4` | 去掉 | PG 的字符集在 `CREATE DATABASE` 时指定 |
+| `CREATE DATABASE IF NOT EXISTS` | 需提前建库 | PG 不支持该语法 |
+| `UNIQUE KEY uk_xxx (...)` | `CONSTRAINT uk_xxx UNIQUE (...)` | 表2 幂等与表3 抢占均依赖唯一键冲突 |
+
+索引字节预算在 PG 上比 MySQL 宽松：MySQL utf8mb4 按**声明长度 × 4** 预分配索引长度，PG 按**实际存储字节**计算，表3 唯一键在 PG 上仅占百余字节。
+
 需确认目标库满足三条 SQL 兼容性约束：
 
-- **唯一键冲突判定**：工具以 JDBC 标准 `SQLState` 以 `23` 开头（约束违反类）判定唯一键冲突，以此实现表2 幂等收敛与表3 集群级抢占（表3 的粒度为「行+线程+第几次故障」）。MySQL 与 PostgreSQL 均返回 23 类；若目标库不属 23 类，需同步调整判定逻辑。
+- **唯一键冲突判定**：工具以 JDBC 标准 `SQLState` 以 `23` 开头（约束违反类）判定唯一键冲突，以此实现表2 幂等收敛与表3 集群级抢占（表3 的粒度为「行+线程+调用栈+第几次故障」）。MySQL 与 PostgreSQL 均返回 23 类；若目标库不属 23 类，需同步调整判定逻辑。
 - **自增主键**：4 张表均依赖自增主键与 `getGeneratedKeys()`。
 - **单语句提交**：工具不使用任何数据库特定的 upsert 语法（`INSERT IGNORE` / `ON DUPLICATE KEY` 均未使用）。
 
@@ -239,14 +268,17 @@ premain 同步阻塞是刻意的：阻塞期间应用启动流程尚未开始，
 
 - 每轮演练由 JVM 参数标识：`-Dfault.tag=<轮次标识>`（操作者手动添加）。
 - **不带 `-Dfault.tag` 启动**：模块挂载成功后立即 kill，应用不会运行（无轮次标识无法判重，按硬保护处理，表4 留痕）。
-- 判重键 = **轮次 + 应用（bootJar 部署路径）+ 行 + 线程 + 第几次故障**：同一行在同一线程下本轮最多发生 `inject.fault.times` 次故障（未配置时默认 1；该行被 T 个线程执行时最多 T × N 次）；换新 tag 后所有行重新可注入。
+- 判重键 = **轮次 + 应用（bootJar 部署路径）+ 行 + 线程 + 调用栈 + 第几次故障**：同一行在同一线程、经同一调用栈执行时本轮最多发生 `inject.fault.times` 次故障（未配置时默认 1；该行被 T 个线程、S 种调用栈执行时最多 T × S × N 次）；换新 tag 后所有行重新可注入。
 - **按线程区分**：同一行被不同线程执行时故障效果可能不同，故各线程独立计数。判重用线程名而非线程 ID——线程 ID 仅单 JVM 内唯一且重启后变化，跨进程不可比。
-- 计数推进：模块按「行+线程」维护已确认的故障次数，每次执行到就尝试插入 `fault_seq = 次数+1`；插入成功即注入故障，冲突表示该次已被他节点/进程抢占——两种情况计数都 +1，据此与数据库状态同步。次数用尽后移出计数器，之后不再撞库。
-- 集群语义：同一「行 + 线程 + 第几次」组合**最多导致集群内一个节点死亡**（由数据库唯一索引保证）。
+- **按调用栈区分**：同一行经不同调用路径执行时故障场景不同，故每种调用栈各占一次故障机会。调用栈原文长度不定，判重用其 MD5 摘要 `stack_hash`，原文 `stack_text` 随记录一同落库。
+- 计数推进：模块按「行+线程+调用栈」维护已确认的故障次数，每次执行到就尝试插入 `fault_seq = 次数+1`；插入成功即注入故障，冲突表示该次已被他节点/进程抢占——两种情况计数都 +1，据此与数据库状态同步。次数用尽后移出计数器，之后不再撞库。
+- 集群语义：同一「行 + 线程 + 调用栈 + 第几次」组合**最多导致集群内一个节点死亡**（由数据库唯一索引保证）。
 
 ### 6.3 命中与 kill
 
-行执行到时，模块向表3 裸 INSERT 抢占（携带该行该线程的第几次故障 `fault_seq`）：成功 = 赢得该次故障执行权，记日志后 `kill -9`；唯一键冲突 = 该次故障已被他节点/进程触发，计数推进后放行继续执行。
+行执行到时，模块向表3 裸 INSERT 抢占（携带该行该线程该调用栈的第几次故障 `fault_seq`，以及调用栈原文与摘要）：成功 = 赢得该次故障执行权，**打印完整调用栈后** `kill -9`；唯一键冲突 = 该次故障已被他节点/进程触发，计数推进后放行继续执行（该分支不打印调用栈，避免热路径日志膨胀）。
+
+调用栈用于定位故障发生在哪条调用路径上：栈顶会裁掉取栈入口（`java.lang.Thread`）、sandbox 织入探针与事件分发帧、模块自身帧，只保留业务帧，帧格式为 `类名.方法名(文件名:行号)`，不做深度截断。判重键依赖调用栈摘要，摘要只能由取栈算出，因此 `beforeLine` 每次回调都会做一次完整栈遍历——行级回调是热路径，这会让目标应用明显变慢，是判重粒度细化到调用栈的既定代价；追求执行速度时用 `inject.include.methods` 缩小注入范围。
 
 ### 6.4 临时副本清理（运维无感知）
 
@@ -284,8 +316,8 @@ agent 已内置清理守护（挂载完成后在 JVM 内同步快照副本清单
 | `jdbc driver resolved: <类名>` | 驱动加载成功（module 侧为驱动标准类名） |
 | `skipped classes (no method kept): N` | 因名单过滤而整类跳过的类数 |
 | `inject done: registered=X/Y classes, methods=M, tag=...` | 注入完成，等待首次命中 |
-| `FAULT HIT & PREEMPTED: tag=... unitId=... class=... method=... line=... seq=k/N thread=... machine=...` | **故障命中**：该行该线程本轮第 k 次故障（上限 N），记录后进程即将被 kill |
-| `fault seq already preempted in this round (tag=...), release execution: class#method#line#thread seq=k` | 该行该线程本轮的第 k 次故障已被他节点/进程触发，本节点放行 |
+| `FAULT HIT & PREEMPTED: tag=... unitId=... class=... method=... line=... seq=k/N thread=... stackHash=... machine=...` 换行接 `call stack (N frames):` 与逐帧调用栈 | **故障命中**：该行该线程该调用栈本轮第 k 次故障（上限 N），调用栈已打印并随记录入库，进程即将被 kill |
+| `fault seq already preempted in this round (tag=...), release execution: class#method#line#thread#stackHash seq=k` | 该行该线程该调用栈本轮的第 k 次故障已被他节点/进程触发，本节点放行 |
 | `inject skipped: units already injected` | 重复执行挂载命令被忽略 |
 
 ### 7.3 异常与告警（出现即代表按策略 kill）
@@ -361,7 +393,7 @@ agent 已内置清理守护（挂载完成后在 JVM 内同步快照副本清单
 |---|---|---|---|
 | C1 | 类名不在本批映射 | 直接返回 | 正常执行 |
 | C2 | 该行该线程本轮故障次数已用尽（已用尽集合命中） | 直接返回（不撞库、不计数） | 正常执行 |
-| C3 | 裸 INSERT 成功 = 赢得该行该线程本轮第 `fault_seq` 次的故障执行权 | 日志 → `kill -9` 自己 | **进程终止** |
+| C3 | 裸 INSERT 成功 = 赢得该行该线程该调用栈本轮第 `fault_seq` 次的故障执行权 | 打印调用栈 → `kill -9` 自己 | **进程终止** |
 | C4 | `kill` 命令未生效 | 表4 留痕 + **回滚删除表3 该条记录**（按完整判重键，防脏数据永久阻塞该次故障）+ 计数回退 | 放行继续 |
 | C5 | 唯一键冲突（SQLState 23 类）= 该次故障已被他节点/进程触发；**其他 SQL 错误 → 硬保护** | 计数 +1 | 放行继续（仅冲突） |
 | C6 | 任何异常（含 DB 不可用） | 表4（尽力）→ kill；kill 未生效则 `halt(137)` | **进程终止** |
@@ -374,7 +406,7 @@ agent 已内置清理守护（挂载完成后在 JVM 内同步快照副本清单
 | 解析中途失败/超时 | **保持未完成**（不回退） | — | 有 | kill |
 | 定位/建表/配置失败 | 无记录 | — | 有 | kill |
 | 挂载失败/超时 | **保持 completed** | — | 有 | kill |
-| 命中故障 | — | 1 行（每行每线程最多 N 行；唯一索引保证每个「行+线程+第几次」集群唯一） | — | kill |
+| 命中故障 | — | 1 行（每行每线程每调用栈最多 N 行；唯一索引保证每个「行+线程+调用栈+第几次」集群唯一） | — | kill |
 | 同轮的该次故障已被他节点命中 | — | 无（冲突忽略） | — | 放行（计数推进） |
 
 ---
@@ -395,7 +427,7 @@ agent 已内置清理守护（挂载完成后在 JVM 内同步快照副本清单
 | JDK 核心类 / native 方法默认不注入 | sandbox 对 `loader==null` 的类默认排除（`unsafe.enable` 可放开）；native 需 `isNativeSupported` 开关 |
 | **超过 64KB 的方法插桩后整体失效** | 行级插桩使方法字节码膨胀 2~3 倍，超限 → 整类 `VerifyError` → sandbox 回退原始字节码 → **该类所有行静默不增强**。排查：开 sandbox 的 dumpClass 或查 transform 失败记录 |
 | **线程名需具备稳定业务语义** | 判重键含线程名。若应用使用默认或动态线程名（如 `Thread-0`、`pool-1-thread-1`），重启后线程名变化会使判重键随之变化，故障次数将不再受 `inject.fault.times` 限制 |
-| 计数器按「行+线程」占用内存 | 每个 (行,线程) 组合一个 entry，用尽后移入只存 key 的已用尽集合；线程数多时占用约为「按行计数」的线程数倍 |
+| 计数器按「行+线程+调用栈」占用内存 | 每个 (行,线程,调用栈) 组合一个 entry，用尽后移入只存 key 的已用尽集合；占用约为「按行计数」的（线程数 × 调用路径数）倍。递归方法的同一行在不同深度会产生不同调用栈摘要，使其调用路径数随深度增长 |
 | 必须以 `-jar` 启动 | bootJar 路径从启动参数定位 |
 | 无 `-Dfault.tag` 则进程被 kill | 无轮次标识无法判重，按硬保护不放行 |
 | 全量行 hook 有性能开销 | 仅本轮未命中行存在；已命中/已抢占行有内存短路 |
@@ -421,9 +453,12 @@ agent 已内置清理守护（挂载完成后在 JVM 内同步快照副本清单
 agent fat jar 内的第三方依赖被 shadow relocate，jar 中不存在原包名的驱动类；module 未做 relocate。详见 [5.7](#57-agent-侧-relocate-与驱动名的对应关系)。
 
 **Q6：一行到底会发生多少次故障？**
-`inject.fault.times` 是**每行每线程**的上限。同一行被 T 个线程执行时，本轮最多 T × N 次故障；每个「行+线程+第几次」组合在集群内只死一个节点。表3 中同一行会有多条记录，靠 `fault_seq` 区分第几次。
+`inject.fault.times` 是**每行每线程每调用栈**的上限。同一行被 T 个线程、S 种调用栈执行时，本轮最多 T × S × N 次故障；每个「行+线程+调用栈+第几次」组合在集群内只死一个节点。表3 中同一行会有多条记录，靠 `stack_hash` 区分调用路径、靠 `fault_seq` 区分第几次。
 
-**Q7：想临时不让 agent 干活？**
+**Q7：加了调用栈判重后应用明显变慢，正常吗？**
+正常，且是既定代价。判重键含调用栈摘要，摘要只能由取栈算出，因此每次行回调都要做一次完整栈遍历。用 `inject.include.methods` 缩小注入范围可直接降低这部分开销；若某行存在递归，同一行在不同递归深度会产生不同摘要、故障机会数随深度增长，可用 `exclude.methods` 把递归方法排除。
+
+**Q8：想临时不让 agent 干活？**
 把 `mount.enabled` 设为 `false` 可只解析不注入；从启动命令去掉 `-javaagent` 参数重启则完全不介入（不要用其它方式绕过，无 tag 时进程会被 kill）。
 
 ---
