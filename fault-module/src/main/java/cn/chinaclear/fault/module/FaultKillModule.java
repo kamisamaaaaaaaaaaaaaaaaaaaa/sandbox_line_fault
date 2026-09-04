@@ -21,7 +21,6 @@ import javax.annotation.Resource;
 import java.lang.management.ManagementFactory;
 import java.util.ArrayList;
 import java.util.HashMap;
-import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -90,10 +89,8 @@ public class FaultKillModule implements Module {
             // 配合 registerBatch 内按方法名去重，避免同一方法被跨批重复注册 watch
             String lastClass = "";
             String lastMethod = "";
-            // 按类名去重累计：同一类的不同方法会分布在不同批次，直接累加会把同一类重复计数
-            Set<String> countedClasses = new HashSet<>();
+            RegisterStat stat = new RegisterStat();
             long totalMethods = 0L;
-            int registered = 0;
             while (true) {
                 List<ClassMethodInfo> batch = methodDao.findPageByUnitIds(unitIds, lastClass,
                         lastMethod, config.injectBatchSize());
@@ -117,14 +114,15 @@ public class FaultKillModule implements Module {
                     }
                     classToUnitId.put(m.getClassName(), m.getUnitId());
                 }
-                countedClasses.addAll(classMethods.keySet());
+                // 类数不去重累计：按类名去重需要常驻一个 Set，类数多时占用可观，
+                // 且各批情况已由上面的 batch registered 逐批打印，无需再汇总出一个口径易混淆的总数
 
                 // 每批一个 listener（只持本批映射，随批次释放）
                 KillAdviceListener listener =
                         new KillAdviceListener(faultRecordDao, errorRecordDao, classToUnitId, pid, tag,
                                 bootJar, bootJarHash, config.faultTimes());
-                registered += registerBatch(classMethods, listener, errorRecordDao, unitIds,
-                        config.includeMethods(), config.excludeMethods());
+                registerBatch(classMethods, listener, errorRecordDao, unitIds,
+                        config.includeMethods(), config.excludeMethods(), stat);
                 FaultLogger.info("batch registered: methods=" + batch.size()
                         + " classes=" + classMethods.size()
                         + " cursor=" + lastClass + "#" + lastMethod);
@@ -139,8 +137,8 @@ public class FaultKillModule implements Module {
                 return;
             }
 
-            if (registered == 0) {
-                // 解析到了方法，但经 include/exclude 过滤后一个类都没注册：名单与解析结果无交集，
+            if (stat.methods == 0) {
+                // 解析到了方法，但经 include/exclude 过滤后一个方法都没注入：名单与解析结果无交集，
                 // 等价于"挂载了却零覆盖"，按硬保护处理（绝不放行）
                 FaultLogger.error("no class registered after include/exclude filtering, unitIds=" + unitIds
                         + " -> kill per policy");
@@ -152,8 +150,9 @@ public class FaultKillModule implements Module {
             }
 
             injectedUnits.addAll(unitIds);
-            FaultLogger.info("inject done: registered=" + registered + "/" + countedClasses.size()
-                    + " classes, methods=" + totalMethods + ", tag=" + tag + ", waiting for first line hit");
+            FaultLogger.info("inject done: injected=" + stat.methods + " methods (=" + stat.classes
+                    + " class-watches), scanned=" + totalMethods + " rows, tag=" + tag
+                    + ", waiting for first line hit");
         } catch (Throwable t) {
             // 模块内自行兜住所有致命异常：表4 留痕后直接 kill（不依赖 sandbox/agent 传递）
             FaultLogger.error("inject failed, kill process per policy", t);
@@ -169,16 +168,27 @@ public class FaultKillModule implements Module {
     }
 
     /**
+     * 累计注册结果（不记录具体类名，避免为统计常驻一个随类数增长的集合）。
+     */
+    private static final class RegisterStat {
+        /** 类级 watch 数：一个类一次链式注册 */
+        int classes;
+        /** 方法级注入点数：一个方法名即一个注入点（按名匹配会覆盖它的全部重载） */
+        int methods;
+    }
+
+    /**
      * 注册一批类的 watch（每个类一次链式注册，方法逐个 onBehavior 链上）。
      * 过滤顺序：先按 inject.include.methods 选入（名单为空则全部入选），再按 exclude.methods 排除；
      * 只有既在名单内、又未被排除的方法会被注入。
+     * 结果累加进 stat（类级 watch 数、方法级注入点数）。
      */
-    private int registerBatch(Map<String, List<String>> classMethods, KillAdviceListener listener,
+    private void registerBatch(Map<String, List<String>> classMethods, KillAdviceListener listener,
                              ErrorRecordDao errorRecordDao, List<Long> unitIds,
-                             List<String> includeMethodRegex, List<String> excludeMethodRegex) {
+                             List<String> includeMethodRegex, List<String> excludeMethodRegex,
+                             RegisterStat stat) {
         java.util.regex.Pattern[] includeMethod = compilePatterns(includeMethodRegex);
         java.util.regex.Pattern[] excludeMethod = compilePatterns(excludeMethodRegex);
-        int registered = 0;
         int skipped = 0;
         for (Map.Entry<String, List<String>> entry : classMethods.entrySet()) {
             String className = entry.getKey();
@@ -209,7 +219,10 @@ public class FaultKillModule implements Module {
                 building.onWatching()
                         .withLine()
                         .onWatch(listener);
-                registered++;
+                // 一个类一次 watch 注册（多个方法名链在同一个 watch 上）；
+                // 注入故障点数按方法名计——一个方法名即一个注入点，按名匹配会覆盖它的全部重载
+                stat.classes++;
+                stat.methods += methodNames.size();
             } catch (Throwable t) {
                 // 单类注册失败 = 故障覆盖不完整，落表4 后抛出，由 inject 外层统一 kill
                 FaultLogger.error("register watch failed for class=" + entry.getKey(), t);
@@ -221,7 +234,6 @@ public class FaultKillModule implements Module {
         if (skipped > 0) {
             FaultLogger.info("skipped classes (no method kept): " + skipped);
         }
-        return registered;
     }
 
     private static java.util.regex.Pattern[] compilePatterns(List<String> regexes) {

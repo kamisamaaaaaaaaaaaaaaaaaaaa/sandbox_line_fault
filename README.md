@@ -320,7 +320,8 @@ agent 已内置清理守护（挂载完成后在 JVM 内同步快照副本清单
 | `filter: include=N regex(es) ..., exclude=M regex(es) ..., driver=...` | 注入时的过滤概况（`include=0` = 所有方法都是候选） |
 | `jdbc driver resolved: <类名>` | 驱动加载成功（module 侧为驱动标准类名） |
 | `skipped classes (no method kept): N` | 因名单过滤而整类跳过的类数 |
-| `inject done: registered=X/Y classes, methods=M, tag=...` | 注入完成，等待首次命中 |
+| `batch registered: methods=M classes=C cursor=类名#方法名` | **每批**注册情况：`M` 本批读到的行数、`C` 本批注册的类数、`cursor` 该批断点（各批游标严格递增即说明无重复注册） |
+| `inject done: injected=N methods (=W class-watches), scanned=S rows, tag=...` | 注入完成：`N` **注入故障点数**（方法名数，一个方法名覆盖其全部重载）、`W` 类级 watch 数、`S` 读取的 `t_class_method` 行数（`S > N` 说明存在同名重载行被去重） |
 | `FAULT HIT & PREEMPTED: tag=... unitId=... class=... method=... line=... seq=k/N thread=... stackHash=... machine=...` 换行接 `call stack (N frames):` 与逐帧调用栈 | **故障命中**：该行该线程该调用栈本轮第 k 次故障（上限 N），调用栈已打印并随记录入库，进程即将被 kill |
 | `fault seq already preempted in this round (tag=...), release execution: class#method#line#thread#stackHash seq=k` | 该行该线程该调用栈本轮的第 k 次故障已被他节点/进程触发，本节点放行 |
 | `inject skipped: units already injected` | 重复执行挂载命令被忽略 |
@@ -443,7 +444,7 @@ agent 已内置清理守护（挂载完成后在 JVM 内同步快照副本清单
 ## 10. 常见问题
 
 **Q1：应用启动后没被 kill，是故障没挂上吗？**
-不一定。kill 只在该行该线程本轮故障次数尚未用尽、且执行到时触发。看模块日志是否有 `inject done: registered=N/M`；用 `curl` 打一个会走业务方法的接口验证。若已挂载且方法执行过，检查该行该线程本轮是否已达 `inject.fault.times` 次（`t_fault_record` 按 tag 查）。
+不一定。kill 只在该行该线程本轮故障次数尚未用尽、且执行到时触发。看模块日志是否有 `inject done: injected=N methods`（`N > 0` 表示已注入）；用 `curl` 打一个会走业务方法的接口验证。若已挂载且方法执行过，检查该行该线程本轮是否已达 `inject.fault.times` 次（`t_fault_record` 按 tag 查）。
 
 **Q2：换了一版应用重启，为什么又解析了一次？**
 应用内容变化 → 解析单元 hash 变化 → 自动重新解析并生成新 unitId。旧单元结果保留，属于预期行为。
