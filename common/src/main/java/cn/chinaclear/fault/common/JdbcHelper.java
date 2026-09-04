@@ -157,16 +157,23 @@ public final class JdbcHelper {
         }
     }
 
+    /** 行级失败上下文：把该行的业务内容格式化为可读文本，随异常进入硬保护日志与表4 */
+    public interface RowLabel {
+        String describe(Object[] row);
+    }
+
     /**
      * 逐行裸 INSERT（每行独立 autocommit 立即提交）：唯一键冲突（SQLState 23 类）的行跳过
      * （该行已存在），其他任何 SQLException 上抛由调用方走硬保护。
+     * 非 23 类错误的异常消息附带 {@link RowLabel} 生成的该行完整业务内容
+     * （如类名/方法名/描述符原文与长度），保证硬保护日志能直接定位问题数据。
      *
      * 为什么不用跨行事务：表2 靠唯一索引幂等收敛，任何部分写入都是合法中间态（重解析自动补齐），
      * 无需事务原子性；而多语句长事务会把重复键 S 锁（RR 下含 next-key gap 锁）累积到批尾，
      * 多节点并发解析同一单元时构成锁等待环（实测发生过 InnoDB 死锁）。
      * 逐行提交后锁持有毫秒级，单语句事务结构上不可能形成死锁环。
      */
-    public void batchInsertSkipConflict(String sql, List<Object[]> rows) {
+    public void batchInsertSkipConflict(String sql, List<Object[]> rows, RowLabel label) {
         if (rows == null || rows.isEmpty()) {
             return;
         }
@@ -178,7 +185,13 @@ public final class JdbcHelper {
                         ps.executeUpdate();
                     } catch (SQLException e) {
                         if (!isConstraintConflict(e)) {
-                            throw e;    // 非 23 类错误：上抛（调用方走硬保护）
+                            String ctx;
+                            try {
+                                ctx = label == null ? "" : " [" + label.describe(row) + "]";
+                            } catch (RuntimeException ex) {
+                                ctx = " [row label unavailable: " + ex.getMessage() + "]";
+                            }
+                            throw new SQLException("row insert failed" + ctx + " - " + e.getMessage(), e);
                         }
                         // 唯一键冲突：该行已存在（他节点/上次解析已写入），跳过
                     }

@@ -18,6 +18,12 @@ public class FaultRecord {
     private String bootJarHash;
     private String className;
     private String methodName;
+    /**
+     * 命中方法的 ASM 描述符（如 (Ljava/lang/String;)V），供排查时区分重载。
+     * 纯观测字段、不入索引：(class_name, method_name, line_no) 已能唯一定位一个重载
+     * （同一类里两个方法的行号表不重叠）。
+     */
+    private String methodDesc;
     private int lineNo;
     private String threadName;
     /** 该行该线程该调用栈本轮的第几次故障（从 1 开始），上限由 inject.fault.times 决定 */

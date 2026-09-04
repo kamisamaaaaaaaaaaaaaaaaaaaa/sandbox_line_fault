@@ -21,9 +21,6 @@ import java.util.List;
  */
 public final class FaultAgent {
 
-    private static final int MAX_MESSAGE = 1000;
-    private static final int MAX_DETAIL = 60000;
-
     private FaultAgent() {
     }
 
@@ -94,8 +91,9 @@ public final class FaultAgent {
             ErrorRecord er = new ErrorRecord();
             er.setPhase(e.phase);
             er.setErrorType(e.errorType);
-            er.setMessage(trim(e.getMessage(), MAX_MESSAGE));
-            er.setDetail(trim(e.detail, MAX_DETAIL));
+            // 不做截断：message / detail 为 MEDIUMTEXT，列宽兜底统一由 ErrorRecordDao 负责（单点、覆盖全部写入路径）
+            er.setMessage(e.getMessage());
+            er.setDetail(e.detail);
             er.setUnitIds(joinIds(e.unitIds));
             er.setBootJar(e.bootJar);
             er.setHostname(MachineInfo.hostname());
@@ -140,10 +138,4 @@ public final class FaultAgent {
         return sb.toString();
     }
 
-    private static String trim(String s, int max) {
-        if (s == null || s.length() <= max) {
-            return s;
-        }
-        return s.substring(0, max) + "...(truncated)";
-    }
 }

@@ -25,13 +25,19 @@ CREATE TABLE IF NOT EXISTS t_jar_record (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 -- 表2：类-方法解析结果（幂等增量插入）
+-- 描述符长度不定（超多参数方法可达 KB 级），不入索引：索引里存 desc_hash（MD5 前 16 hex），
+-- 原文以 TEXT 完整保留（与表3 boot_jar_hash/stack_text 同一模式：摘要入索引、原文另存）。
+-- 唯一索引 uk_method(unit_id, class_name, method_name, desc_hash)：unit_id 8 + class 256×4
+-- + method 128×4 + desc_hash 16×4 = 1608B < 3072B；描述符原文直接入索引会超字节预算，
+-- 且超 256 字符即触发 Data too long 走硬保护——这是摘要方案取代它的直接原因。
 CREATE TABLE IF NOT EXISTS t_class_method (
   id           BIGINT AUTO_INCREMENT PRIMARY KEY,
   unit_id      BIGINT       NOT NULL COMMENT '→ t_jar_record.id',
   class_name   VARCHAR(256) NOT NULL COMMENT '完全限定名',
   method_name  VARCHAR(128) NOT NULL,
-  method_desc  VARCHAR(256) NOT NULL COMMENT 'ASM 描述符，区分重载',
-  UNIQUE KEY uk_method (unit_id, class_name, method_name, method_desc)
+  method_desc  TEXT         NOT NULL COMMENT 'ASM 描述符完整原文（仅观测，不入索引）',
+  desc_hash    CHAR(16)     NOT NULL COMMENT '描述符的 MD5 前 16 位 hex（区分重载，索引键）',
+  UNIQUE KEY uk_method (unit_id, class_name, method_name, desc_hash)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 -- 表3：故障注入记录（判重键 = tag + bootJar 部署路径 + 类 + 方法 + 行 + 线程 + 调用栈 + 第几次故障：
@@ -47,6 +53,7 @@ CREATE TABLE IF NOT EXISTS t_fault_record (
   boot_jar_hash CHAR(16)     NOT NULL COMMENT 'MD5(boot_jar) 前 16 位 hex（索引键）',
   class_name    VARCHAR(256) NOT NULL,
   method_name   VARCHAR(128) NOT NULL,
+  method_desc   TEXT         NULL COMMENT '命中方法的 ASM 描述符（供区分重载，纯观测，不入索引）',
   line_no       INT          NOT NULL,
   thread_name   VARCHAR(128) NOT NULL,
   fault_seq     INT          NOT NULL COMMENT '该行该线程该调用栈本轮的第几次故障（从 1 开始，上限由 inject.fault.times 决定）',
@@ -58,7 +65,21 @@ CREATE TABLE IF NOT EXISTS t_fault_record (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 -- =====================================================================
--- 已有库升级：为 t_fault_record 增加调用栈两列并细化唯一键
+-- 已有库升级 2：t_class_method 描述符列扩容并改用摘要判重
+-- 适用场景：method_desc VARCHAR(256) 的旧表。超多参数方法的描述符超 256 会导致
+-- 解析落库报 Data too long → 硬保护 kill。执行前建议备份该表。
+-- 注意：升级后必须部署含 desc_hash 写入的新版 agent——旧版 agent 在新表上会把所有
+-- desc_hash 写成默认值 ''，同单元同类同名方法（不同重载）会互相冲突跳过，丢失重载行。
+-- =====================================================================
+-- ALTER TABLE t_class_method
+--   ADD COLUMN desc_hash CHAR(16) NOT NULL DEFAULT '' COMMENT '描述符 MD5 前 16 hex（索引键）' AFTER method_name,
+--   MODIFY method_desc TEXT NOT NULL COMMENT 'ASM 描述符完整原文（仅观测，不入索引）',
+--   DROP INDEX uk_method,
+--   ADD UNIQUE KEY uk_method (unit_id, class_name, method_name, desc_hash);
+-- UPDATE t_class_method SET desc_hash = SUBSTR(MD5(method_desc), 1, 16) WHERE desc_hash = '';
+
+-- =====================================================================
+-- 已有库升级 1：为 t_fault_record 增加调用栈两列并细化唯一键
 -- 适用场景：本文件此前已执行过、t_fault_record 已存在且已有数据的库。
 -- 存量记录 stack_hash 统一为 ''，仍满足新唯一键——原唯一键已保证前 7 列组合唯一，
 -- 追加一列后不会与存量数据冲突。执行前建议备份该表。
@@ -74,8 +95,10 @@ CREATE TABLE IF NOT EXISTS t_error_record (
   id          BIGINT AUTO_INCREMENT PRIMARY KEY,
   phase       VARCHAR(16)   NOT NULL COMMENT 'PARSE | DB | MOUNT',
   error_type  VARCHAR(16)   NOT NULL COMMENT 'TIMEOUT | EXCEPTION',
-  message     VARCHAR(1024) NOT NULL,
-  detail      TEXT          NULL COMMENT '异常堆栈',
+  -- message 可能携带超长问题数据（完整方法描述符，KB 级）；detail 为异常栈（深栈可达数百 KB）。
+  -- 二者均为观测型长文本，用 MEDIUMTEXT 完整保留，不入索引
+  message     MEDIUMTEXT    NOT NULL COMMENT '错误消息（可能携带超长问题数据，完整原文）',
+  detail      MEDIUMTEXT    NULL COMMENT '异常堆栈',
   unit_ids    VARCHAR(256)  NULL COMMENT '涉及的表1 id 列表文本',
   boot_jar    VARCHAR(512)  NULL,
   hostname    VARCHAR(128)  NOT NULL,

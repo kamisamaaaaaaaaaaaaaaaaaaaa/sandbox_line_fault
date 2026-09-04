@@ -101,4 +101,22 @@ public final class JarHashUtil {
             throw new IllegalStateException("digest file failed: " + file, e);
         }
     }
+
+    /**
+     * MD5 前 16 位 hex（64bit）：把超长文本压缩为短索引键——索引里存摘要、原文另存超长列
+     * （与表3 boot_jar_hash 同一模式）。单解析单元万级方法量下碰撞概率可忽略；
+     * 极端碰撞的后果仅为一条重载记录被幂等跳过，不影响 watch 注册（模块按类名+方法名匹配）。
+     */
+    public static String md5Hex16(String value) {
+        try {
+            MessageDigest md = MessageDigest.getInstance("MD5");
+            StringBuilder sb = new StringBuilder(32);
+            for (byte b : md.digest(value.getBytes(java.nio.charset.StandardCharsets.UTF_8))) {
+                sb.append(Character.forDigit((b >> 4) & 0xF, 16)).append(Character.forDigit(b & 0xF, 16));
+            }
+            return sb.substring(0, 16);
+        } catch (Exception e) {
+            throw new IllegalStateException("MD5 unavailable", e);
+        }
+    }
 }

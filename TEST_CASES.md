@@ -132,6 +132,24 @@ ORDER BY class_name, method_name, line_no, thread_name;
 
 载荷说明：stress-app 重新生成（`gen-stress.ps1 -Methods 8 -SeqLines 5 -BranchLines 2 -Threads 4`），并把 `run()` 取模域扩为 `% (METHOD_COUNT + 4)`，使 else 兜底分支（同样调用 method0）真实可达——method0 因此拥有两条调用路径（`run:21` / `run:37` 两个调用点行号），用于构造「同一行不同调用栈」场景。
 
+## 重载方法与签名（O 系列，2026-09-04 追加验证）
+
+> 语义：sandbox 的 `onBehavior(String)` 只按方法名匹配，注册一次即织入同名方法的**全部重载**；
+> 因此 `t_class_method` 中同一 `(class_name, method_name)` 的多个重载行对注入是冗余的，
+> 模块以 `(class_name, method_name)` 为严格大于游标分页，每个方法名只注册一次。
+> `t_fault_record.method_desc` 记录命中方法的 ASM 描述符，供排查区分重载（不参与判重）。
+
+| # | 用例 | 结果 | 备注 |
+| --- | --- | --- | --- |
+| O1 | 按方法名注入是否影响所有重载（tag=ov-v1，载荷新增 `cn.stress.Overloaded.target(String)` 与 `target(int)`，行号范围 18-24 / 28-34） | ✅ | 两重载的行号**均出现命中**，各 4 次（4 个 worker 线程独立计数）——证实按名注入织入全部重载 |
+| O2 | `t_class_method` 重载行落库与 `desc_hash`（tag=ov-v2） | ✅ | `Overloaded.target` 两行（`(I)J` / `(Ljava/lang/String;)J`），`desc_hash` 与 `SUBSTR(MD5(method_desc),1,16)` 一致（match=true） |
+| O3 | `t_fault_record.method_desc` 区分重载 | ✅ | `(Ljava/lang/String;)J` 的记录行号 18-24、`(I)J` 的 28-34，各 28 条（7 行 × 4 线程）；在 `t_class_method` 中匹配不到的记录数 = 0 |
+| O4 | 跨批去重（`inject.batch.size=1`，每个方法名必然跨批，tag=ov-v3） | ✅ | 17 批游标严格递增、每个 `(class_name, method_name)` 只出现一次；`inject done: registered=1/17 classes`（无重复注册）；命中 56 次、行号 18-24 与 28-34 各 4 次，**覆盖范围与去重前一致** |
+| O5 | 重解析幂等（单元置回 pending 触发重新解析，tag=ov-v4） | ✅ | `t_class_method` 行数仍 18（未翻倍）、单元回到 completed、唯一键重复组数 = 0 |
+
+载荷说明：`stress-app` 新增 `cn.stress.Overloaded`（两个 `target` 重载，行号范围刻意错开），`StressWorker.run()` 每轮调用两个重载。
+注意：该载荷为手工改动，**不要再执行 `gen-stress.ps1`**（会覆盖 `StressWorker.java`）。
+
 ## 执行记录
 
 | 日期 | 用例 | 结果 | 备注 |

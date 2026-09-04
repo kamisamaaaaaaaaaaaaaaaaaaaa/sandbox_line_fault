@@ -105,7 +105,10 @@ java -Dfault.tag=round-001 \
 
 ### 3.1 已有库升级
 
-`schema.sql` 以 `CREATE TABLE IF NOT EXISTS` 编写，对**已存在的表不会做任何修改**。表结构变更需手工执行变更语句，语句集中附在 `schema.sql` 文件末尾的「已有库升级」段落：
+**开发/验证阶段**：直接 drop 四张表后重新执行 `schema.sql` 即可，不必执行任何升级语句。
+
+**已有数据的库**：`schema.sql` 以 `CREATE TABLE IF NOT EXISTS` 编写，对**已存在的表不会做任何修改**。
+表结构变更需手工执行变更语句，语句集中附在 `schema.sql` 文件末尾的「已有库升级」段落：
 
 ```bash
 # 第 1 步：备份待变更的表

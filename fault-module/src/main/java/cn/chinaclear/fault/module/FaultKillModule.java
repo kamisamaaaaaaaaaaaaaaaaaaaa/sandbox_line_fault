@@ -21,6 +21,7 @@ import javax.annotation.Resource;
 import java.lang.management.ManagementFactory;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -84,22 +85,29 @@ public class FaultKillModule implements Module {
             FaultRecordDao faultRecordDao = new FaultRecordDao(db);
             ErrorRecordDao errorRecordDao = new ErrorRecordDao(db);
 
-            // 游标分批读取：每批注册后即可被回收，避免大项目全量方法一次性读入内存
-            long lastId = 0L;
+            // 游标分批读取：每批注册后即可被回收，避免大项目全量方法一次性读入内存。
+            // 游标为 (类名, 方法名, 主键) 三元组，使同一 (类名, 方法名) 的重载行连续分布，
+            // 配合 registerBatch 内按方法名去重，避免同一方法被跨批重复注册 watch
+            String lastClass = "";
+            String lastMethod = "";
+            // 按类名去重累计：同一类的不同方法会分布在不同批次，直接累加会把同一类重复计数
+            Set<String> countedClasses = new HashSet<>();
             long totalMethods = 0L;
-            int totalClasses = 0;
             int registered = 0;
             while (true) {
-                List<ClassMethodInfo> batch = methodDao.findPageByUnitIds(unitIds, lastId, config.injectBatchSize());
+                List<ClassMethodInfo> batch = methodDao.findPageByUnitIds(unitIds, lastClass,
+                        lastMethod, config.injectBatchSize());
                 if (batch.isEmpty()) {
                     break;
                 }
-                for (ClassMethodInfo m : batch) {
-                    lastId = Math.max(lastId, m.getId());
-                }
+                // 断点推进到本批最后一条（批次已按 类名, 方法名 升序）
+                ClassMethodInfo tail = batch.get(batch.size() - 1);
+                lastClass = tail.getClassName();
+                lastMethod = tail.getMethodName();
                 totalMethods += batch.size();
 
-                // 本批：类分组 + 方法名去重（onBehavior 按名匹配，天然覆盖重载）；类名 → unitId 映射供表3 记录
+                // 本批：类分组 + 方法名去重（onBehavior 按名匹配，注册一次即覆盖全部重载）。
+                // 跨批无需去重：下一批以 (类名, 方法名) 严格大于断点，同名重载行不会再次出现
                 Map<String, List<String>> classMethods = new LinkedHashMap<>();
                 Map<String, Long> classToUnitId = new HashMap<>();
                 for (ClassMethodInfo m : batch) {
@@ -109,7 +117,7 @@ public class FaultKillModule implements Module {
                     }
                     classToUnitId.put(m.getClassName(), m.getUnitId());
                 }
-                totalClasses += classMethods.size();
+                countedClasses.addAll(classMethods.keySet());
 
                 // 每批一个 listener（只持本批映射，随批次释放）
                 KillAdviceListener listener =
@@ -118,7 +126,8 @@ public class FaultKillModule implements Module {
                 registered += registerBatch(classMethods, listener, errorRecordDao, unitIds,
                         config.includeMethods(), config.excludeMethods());
                 FaultLogger.info("batch registered: methods=" + batch.size()
-                        + " classes=" + classMethods.size() + " lastId=" + lastId);
+                        + " classes=" + classMethods.size()
+                        + " cursor=" + lastClass + "#" + lastMethod);
             }
 
             if (totalMethods == 0) {
@@ -143,7 +152,7 @@ public class FaultKillModule implements Module {
             }
 
             injectedUnits.addAll(unitIds);
-            FaultLogger.info("inject done: registered=" + registered + "/" + totalClasses
+            FaultLogger.info("inject done: registered=" + registered + "/" + countedClasses.size()
                     + " classes, methods=" + totalMethods + ", tag=" + tag + ", waiting for first line hit");
         } catch (Throwable t) {
             // 模块内自行兜住所有致命异常：表4 留痕后直接 kill（不依赖 sandbox/agent 传递）

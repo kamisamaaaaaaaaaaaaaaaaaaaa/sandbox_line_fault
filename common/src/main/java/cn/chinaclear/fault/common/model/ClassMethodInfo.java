@@ -17,6 +17,14 @@ public class ClassMethodInfo {
     private String className;
     /** 方法名（onBehavior 按名匹配，天然覆盖重载） */
     private String methodName;
-    /** ASM 描述符，如 (Ljava/lang/String;)V，用于唯一索引区分重载 */
+    /**
+     * ASM 描述符完整原文，如 (Ljava/lang/String;)V。超多参数方法的描述符可达 KB 级，
+     * 以 TEXT 列完整保留、不入索引（长度不定，入索引会超字节预算）。
+     */
     private String methodDesc;
+    /**
+     * 描述符摘要：描述符的 MD5 前 16 位 hex，唯一索引组成部分，用于区分重载。
+     * 与表3 boot_jar_hash 同一模式：摘要入索引、原文另存。
+     */
+    private String descHash;
 }

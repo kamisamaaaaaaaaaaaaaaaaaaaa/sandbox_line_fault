@@ -81,7 +81,7 @@ JDK9 起 `-jar` 及其路径被归入 main 侧参数，不出现在 `RuntimeMXBe
 #### 3.1.2 解析粒度与注册口径
 
 - **粒度 = 解析单元**：`BOOT-INF/classes/` 整体一个单元，hash = 目录下全部 `.class` 条目按路径排序后内容聚合 SHA-256；白名单命中的每个 lib jar 各一个单元，hash = 字节流 SHA-256。任何类改动重打包后单元 hash 变化，自动触发重新解析。
-- **行号不入库**：sandbox 的 `beforeLine(advice, lineNum)` 回调自带行号，静态解析只需方法名 + 描述符；表2 的唯一索引 `uk(unit_id,class,method,desc)` 配合裸 INSERT 冲突跳过实现幂等。
+- **行号不入库**：sandbox 的 `beforeLine(advice, lineNum)` 回调自带行号，静态解析只需方法名 + 描述符；表2 的唯一索引 `uk(unit_id,class,method,desc_hash)` 配合裸 INSERT 冲突跳过实现幂等。
 - **流式解析 + 分批写库**：`BootJarParser` 以 `UnitSink` 回调逐条 push 方法，`UnitWriter` 累积到 `parse.batch.size` 即写库一次，单元结束 flush 剩余。内存占用为 O(一批方法 + 类名集合)，大项目不会打爆内存。
 - **已完成单元跳过内容解析**：`beginUnit` 返回 null 时跳过该单元的 ASM 解析（仍计算 hash 用于判定）。
 - **方法注册口径**（过滤在 `BootJarParser.parseClass` 内，按 `ACC_SYNTHETIC` 与方法名判定）：
@@ -101,7 +101,7 @@ JDK9 起 `-jar` 及其路径被归入 main 侧参数，不出现在 `RuntimeMXBe
 | completed | 已完成 | 跳过复用 |
 | 任何其他状态（pending / 历史 failed） | 未完成 | **本节点直接解析**，解析完成置 completed |
 
-正确性完全由表2 保证：唯一索引 `uk(unit_id,class,method,desc)` + 裸 INSERT 冲突跳过（JDBC 标准 SQLState 23 类判定）幂等。多节点解析的是**同一个 sha256 的 jar**（内容字节级相同），解析结果一致，并集即任一节点的结果——重复解析只多花一次 CPU，不产生数据冲突。
+正确性完全由表2 保证：唯一索引 `uk(unit_id,class,method,desc_hash)` + 裸 INSERT 冲突跳过（JDBC 标准 SQLState 23 类判定）幂等。多节点解析的是**同一个 sha256 的 jar**（内容字节级相同），解析结果一致，并集即任一节点的结果——重复解析只多花一次 CPU，不产生数据冲突。
 
 **逐行独立提交（autocommit）**：
 
@@ -203,11 +203,31 @@ sandbox 1.4.0 的 `EventWatchBuilder` 没有 `withLoad()`。但 watcher 是**常
 - **原子性**：判重完全依赖数据库唯一索引（裸 INSERT 的冲突判定为单语句原子操作），并发同抢同一「行+线程+调用栈+第几次」仅 1 条成功——不依赖应用内锁，多机多实例天然安全。
 - **本地计数的作用**：`counters` / `exhausted` 既减少热路径上的无效撞库，也承担故障次数推进——进程重启后计数归零，靠插入冲突重新与数据库状态同步，因此不依赖本地状态的持久性。
 
-#### 3.3.3 调用栈快照
+#### 3.3.3 重载方法与注入粒度
+
+sandbox 的 `onBehavior(String)` **只按方法名匹配**（API 另有 `withParameterTypes(...)` 可精确匹配单个重载，
+本工具未使用），因此注册一次即织入该名字下的**全部重载方法**。由此产生两条设计：
+
+- **注入按方法名去重**：`t_class_method` 中同一 `(class_name, method_name)` 有多个重载行（描述符不同），
+  对注入而言是冗余的。模块读取时以 `(class_name, method_name)` 为游标做**严格大于**的分页：
+
+  ```sql
+  WHERE unit_id IN (...) AND (class_name, method_name) > (?, ?)
+  ORDER BY class_name, method_name LIMIT n
+  ```
+
+  每个 `(class_name, method_name)` 只出现在第一批，后续同名重载行被自然跳过——
+  既避免跨批重复注册 watch，也省去读取冗余行。这些行仍完整保留在表中，供统计与排查使用。
+  批内仍按方法名去重（同一批可能含同一方法名的多个重载行）。
+- **故障记录携带方法签名**：`t_fault_record.method_desc` 记录命中方法的 ASM 描述符，供排查时区分是哪个重载触发。
+  `Behavior` 接口未暴露描述符，由 `getParameterTypes()` + `getReturnType()` 按 JVM 规范还原（与解析侧存储格式一致）。
+  该字段**不参与判重**：`(class_name, method_name, line_no)` 在字节码层面已唯一对应一个重载（同一类里两方法的行号表不重叠）。
+
+#### 3.3.4 调用栈快照
 
 故障命中时记录触发该次故障的调用栈，用于定位故障发生在哪条调用路径上。
 
-- **以摘要入索引、原文另存文本列**：调用栈原文长度不定，且表3 唯一键的字节预算已接近上限（核算见[第 4 章](#4-数据模型)），
+- **以摘要入索引、原文另存文本列**：调用栈原文长度不定，且 `t_fault_record` 唯一键的字节预算已接近上限（核算见[第 4 章](#4-数据模型)），
   无法容纳原文。故 `stack_hash`（`MD5` 32 位 hex，128B）入唯一索引，原文 `stack_text` 存 `MEDIUMTEXT` 不入索引。
   两者由同一次取栈产生，可用 `stack_text` 复算核对 `stack_hash`。
 - **取栈位于判重之前**：判重键含 `stack_hash`，摘要只能由取栈算出，因此 `beforeLine` 中"未注入类"的判空之后、
@@ -221,7 +241,7 @@ sandbox 1.4.0 的 `EventWatchBuilder` 没有 `withLoad()`。但 watcher 是**常
   需要收敛时用 `inject.include.methods` / `exclude.methods` 把递归方法排除在注入范围外。
 - **只在 kill 前打印调用栈**：本节点赢得抢占时才打印；唯一键冲突放行分支会被反复执行，打印会造成日志膨胀。
 
-#### 3.3.4 织入边界（影响覆盖率口径）
+#### 3.3.5 织入边界（影响覆盖率口径）
 
 sandbox 的织入有若干**不可注入**的行，覆盖率必须按"可达行"统计而非 javap 行号全集：
 
@@ -295,19 +315,41 @@ relocate 规则的命名约束见 README「agent fat jar 的 relocate 与命名�
 
 | 表 | 语义 | 关键约束 |
 |---|---|---|
-| `t_jar_record` | 解析单元（两态：completed / 未完成） | `uk(sha256)` 登记（不用于抢占）。单元以**内容** hash 为键：同一 jar 部署在多个路径时共用同一 unit，应用区分由表3 的 `boot_jar_hash` 负责 |
-| `t_class_method` | 类-方法明细 | `uk(unit_id,class,method,desc)` 幂等（裸 INSERT 冲突跳过） |
-| `t_fault_record` | 故障命中（含轮次 tag、第几次故障、调用栈） | **`uk(tag, boot_jar_hash, class, method, line, thread_name, fault_seq, stack_hash)`** 轮内抢占，粒度为「行+线程+调用栈+第几次」；`ip` 为普通列仅记录死亡节点，不参与判重 |
-| `t_error_record` | 工具自身错误 | — |
+| `t_jar_record` | 解析单元（两态：completed / 未完成） | `uk(sha256)` 登记（不用于抢占）。单元以**内容** hash 为键：同一 jar 部署在多个路径时共用同一 unit，应用区分由 `t_fault_record` 的 `boot_jar_hash` 负责 |
+| `t_class_method` | 类-方法明细 | `uk(unit_id,class,method,desc_hash)` 幂等（裸 INSERT 冲突跳过）。描述符原文 `method_desc TEXT` 完整保留、不入索引；索引键为 `desc_hash`（MD5 前 16 hex）——描述符长度不定，超多参数方法可达 KB 级，入索引既超列宽也超字节预算 |
+| `t_fault_record` | 故障命中（含轮次 tag、第几次故障、调用栈、方法签名） | **`uk(tag, boot_jar_hash, class, method, line, thread_name, fault_seq, stack_hash)`** 轮内抢占，粒度为「行+线程+调用栈+第几次」；`method_desc TEXT` 记录命中方法的 ASM 描述符（供区分重载，**不参与判重**——`(class, method, line)` 已能唯一定位一个重载）；`ip` 为普通列仅记录死亡节点 |
+| `t_error_record` | 工具自身错误 | `message` / `detail` 为 MEDIUMTEXT：错误消息可能携带完整的问题数据（如完整方法描述符），异常栈可达数百 KB。写入统一在 `ErrorRecordDao` 按列宽兜底，覆盖全部写入路径 |
 
-> 索引长度核算（表3 唯一键，utf8mb4）：tag 64×4 + boot_jar_hash 16×4 + class 256×4 + method 128×4
-> + line 4 + thread_name 128×4 + fault_seq 4 + stack_hash 32×4 = **2504B < 3072B**，安全。
-> 余量 568B，这也是调用栈必须以摘要入索引、原文只能另存文本列的原因。
+> 索引长度核算（utf8mb4，上限 3072B）：
+> `t_jar_record` 唯一键 = sha256 64×4 = **256B**。
+> `t_class_method` 唯一键 = unit_id 8 + class 256×4 + method 128×4 + desc_hash 16×4 = **1608B**。
+> `t_fault_record` 唯一键 = tag 64×4 + boot_jar_hash 16×4 + class 256×4 + method 128×4
+> + line 4 + thread_name 128×4 + fault_seq 4 + stack_hash 32×4 = **2504B**（余量 568B——调用栈必须以摘要入索引、
+> 原文另存文本列的原因；后续任何列进入该索引前须重新核算）。
+>
+> `t_class_method` 的 `desc_hash` 是必需的：该表唯一键原本就含 `method_desc`，原文改 TEXT 后必须把它移出索引，
+> 否则既超出字节预算（描述符 8KB 远超 3072B），超 256 字符的描述符也会触发 Data too long 走硬保护。
+> `t_fault_record` 则不需要签名摘要：其唯一键原本不含描述符，且 `(class, method, line)` 在字节码层面
+> 天然唯一对应一个重载（同一类里两个方法的行号表不重叠），签名仅为可观测字段。
+
+### 4.1 字段超长治理
+
+列按其语义分三类处理：
+
+| 类型 | 处理方式 | 例子 |
+|---|---|---|
+| 观测型长文本 | `TEXT` / `MEDIUMTEXT` 完整保留，**不入索引** | `method_desc`、`stack_text`、`t_error_record.message` / `detail` |
+| 需参与判重的长文本 | 另加定长 hash 列入索引，原文仍以长文本保留 | `t_class_method.desc_hash`、`boot_jar_hash`、`stack_hash` |
+| 标识型字段 | 保留 `VARCHAR` 保证可读可查，长度取工程上限 | `class_name`(256)、`method_name`(128)、`boot_jar`(512)、`tag`(64) |
+
+写入侧**不做列宽预检**：列宽约束交由数据库判定，违反时由 `JdbcHelper` 的行级上下文输出该行完整数据
+（类名、方法名、描述符原文与长度、摘要），随异常进入硬保护日志与 `t_error_record`，
+避免在业务代码里硬编码列宽而与 `schema.sql` 耦合。
 
 ---
 
 ## 5. 覆盖率统计口径
 
-覆盖率按**可达行**统计：javap 基线行号全集大于运行时可达行，差集归因于三类——未实例化类的构造器行、运行时不可达分支（基线噪声）、sandbox 织入盲区（`main` 方法与构造器 `super()` 前的行，见 [3.3.4](#334-织入边界影响覆盖率口径)）。
+覆盖率按**可达行**统计：javap 基线行号全集大于运行时可达行，差集归因于三类——未实例化类的构造器行、运行时不可达分支（基线噪声）、sandbox 织入盲区（`main` 方法与构造器 `super()` 前的行，见 [3.3.5](#335-织入边界影响覆盖率口径)）。
 
 表3 的记录数不等于覆盖行数（同一行每「线程+调用栈」组合最多 N 条），覆盖率按 `COUNT(DISTINCT class_name, method_name, line_no)` 统计；按「行+线程+调用栈+第几次」核对时，每个组合应为 N 条且 `fault_seq` 从 1 连续无缺号。同一行出现多条不同 `stack_hash` 的记录，表示该行存在多条调用路径，每条路径各自独立消耗故障机会。

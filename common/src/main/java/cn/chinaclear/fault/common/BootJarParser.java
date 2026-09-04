@@ -130,7 +130,10 @@ public final class BootJarParser {
                     if (synthetic && !isLambda) {
                         return null;
                     }
-                    sink.accept(new ClassMethodInfo(0L, 0L, className, name, desc));
+                    // 描述符完整入库（TEXT 列，不入索引）；区分重载由 descHash 承担。
+                    // 列宽不做预检：超限由数据库判定，异常时 JdbcHelper 的行级上下文会带出完整方法信息
+                    sink.accept(new ClassMethodInfo(0L, 0L, className, name, desc,
+                            JarHashUtil.md5Hex16(desc)));
                     return null;
                 }
             }, ClassReader.SKIP_CODE);

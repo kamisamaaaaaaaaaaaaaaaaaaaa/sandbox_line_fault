@@ -9,6 +9,7 @@ import cn.chinaclear.fault.common.model.ErrorRecord;
 import cn.chinaclear.fault.common.model.FaultRecord;
 import com.alibaba.jvm.sandbox.api.listener.ext.Advice;
 import com.alibaba.jvm.sandbox.api.listener.ext.AdviceListener;
+import com.alibaba.jvm.sandbox.api.listener.ext.Behavior;
 
 import java.util.Date;
 import java.util.Map;
@@ -65,17 +66,21 @@ final class KillAdviceListener extends AdviceListener {
     protected void beforeLine(Advice advice, int lineNum) {
         String lineKey = null;
         try {
-            final String className = advice.getBehavior().getDeclaringClass().getName();
+            final Behavior behavior = advice.getBehavior();
+            final String className = behavior.getDeclaringClass().getName();
             final Long unitId = classToUnitId.get(className);
             if (unitId == null) {
                 return;
             }
-            final String method = advice.getBehavior().getName();
+            final String method = behavior.getName();
             final String threadName = Thread.currentThread().getName();
             // 判重键含调用栈摘要，摘要只能由取栈算出，故取栈位于快速返回之前。
             // 行级回调是热路径，一次完整栈遍历的开销远高于一次集合查找，
             // 这是判重粒度细化到调用栈的既定代价。
             final CallStack stack = CallStack.capture();
+            // 方法描述符：由 Behavior 的参数类型与返回类型还原 JVM 描述符（与 t_class_method 存储格式一致），
+            // 供排查时区分重载；纯观测字段，不参与判重
+            final String methodDesc = descOf(behavior.getReturnType(), behavior.getParameterTypes());
             // 计数/判重键含线程与调用栈：同一行被不同线程执行、或经不同调用路径执行时
             // 故障场景不同，每个「线程 + 调用栈」组合独立计数、各占一次故障机会
             final String hitKey = className + "#" + method + "#" + lineNum + "#" + threadName
@@ -97,6 +102,7 @@ final class KillAdviceListener extends AdviceListener {
             fr.setBootJarHash(bootJarHash);
             fr.setClassName(className);
             fr.setMethodName(method);
+            fr.setMethodDesc(methodDesc);
             fr.setLineNo(lineNum);
             fr.setThreadName(threadName);
             fr.setFaultSeq(seq);
@@ -197,5 +203,54 @@ final class KillAdviceListener extends AdviceListener {
         java.io.StringWriter sw = new java.io.StringWriter();
         t.printStackTrace(new java.io.PrintWriter(sw));
         return sw.toString();
+    }
+
+    /**
+     * 还原方法的 JVM 描述符（如 (Ljava/lang/String;I)J），与 t_class_method 中 ASM 解析出的格式一致。
+     * sandbox 的 Behavior 未暴露描述符，但参数类型与返回类型足以按 JVM 规范还原；
+     * 数组与内部类的 Class#getName 本身就是 JVM 内部名形式（点分替换成分隔符即可）。
+     */
+    private static String descOf(Class<?> returnType, Class<?>[] paramTypes) {
+        StringBuilder sb = new StringBuilder(32);
+        sb.append('(');
+        for (Class<?> p : paramTypes) {
+            sb.append(typeDesc(p));
+        }
+        sb.append(')').append(typeDesc(returnType));
+        return sb.toString();
+    }
+
+    private static String typeDesc(Class<?> c) {
+        if (c.isArray()) {
+            return c.getName().replace('.', '/');
+        }
+        if (!c.isPrimitive()) {
+            return "L" + c.getName().replace('.', '/') + ";";
+        }
+        if (c == int.class) {
+            return "I";
+        }
+        if (c == long.class) {
+            return "J";
+        }
+        if (c == double.class) {
+            return "D";
+        }
+        if (c == float.class) {
+            return "F";
+        }
+        if (c == boolean.class) {
+            return "Z";
+        }
+        if (c == byte.class) {
+            return "B";
+        }
+        if (c == char.class) {
+            return "C";
+        }
+        if (c == short.class) {
+            return "S";
+        }
+        return "V";
     }
 }
