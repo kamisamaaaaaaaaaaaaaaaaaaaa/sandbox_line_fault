@@ -89,8 +89,8 @@ public class FaultKillModule implements Module {
             // 配合 registerBatch 内按方法名去重，避免同一方法被跨批重复注册 watch
             String lastClass = "";
             String lastMethod = "";
-            RegisterStat stat = new RegisterStat();
             long totalMethods = 0L;
+            long injectedMethods = 0L;
             while (true) {
                 List<ClassMethodInfo> batch = methodDao.findPageByUnitIds(unitIds, lastClass,
                         lastMethod, config.injectBatchSize());
@@ -114,18 +114,19 @@ public class FaultKillModule implements Module {
                     }
                     classToUnitId.put(m.getClassName(), m.getUnitId());
                 }
-                // 类数不去重累计：按类名去重需要常驻一个 Set，类数多时占用可观，
-                // 且各批情况已由上面的 batch registered 逐批打印，无需再汇总出一个口径易混淆的总数
-
                 // 每批一个 listener（只持本批映射，随批次释放）
                 KillAdviceListener listener =
                         new KillAdviceListener(faultRecordDao, errorRecordDao, classToUnitId, pid, tag,
                                 bootJar, bootJarHash, config.faultTimes());
+                // 每批独立的结果对象：仅两个计数器，不持有类名等集合（类数多时避免常驻内存）
+                RegisterStat batchStat = new RegisterStat();
                 registerBatch(classMethods, listener, errorRecordDao, unitIds,
-                        config.includeMethods(), config.excludeMethods(), stat);
-                FaultLogger.info("batch registered: methods=" + batch.size()
-                        + " classes=" + classMethods.size()
-                        + " cursor=" + lastClass + "#" + lastMethod);
+                        config.includeMethods(), config.excludeMethods(), batchStat);
+                injectedMethods += batchStat.methods;
+                FaultLogger.info("batch registered: scanned=" + batch.size()
+                        + " rows, classes=" + batchStat.classes
+                        + ", injected=" + batchStat.methods + " methods"
+                        + ", cursor=" + lastClass + "#" + lastMethod);
             }
 
             if (totalMethods == 0) {
@@ -137,7 +138,7 @@ public class FaultKillModule implements Module {
                 return;
             }
 
-            if (stat.methods == 0) {
+            if (injectedMethods == 0) {
                 // 解析到了方法，但经 include/exclude 过滤后一个方法都没注入：名单与解析结果无交集，
                 // 等价于"挂载了却零覆盖"，按硬保护处理（绝不放行）
                 FaultLogger.error("no class registered after include/exclude filtering, unitIds=" + unitIds
@@ -150,9 +151,8 @@ public class FaultKillModule implements Module {
             }
 
             injectedUnits.addAll(unitIds);
-            FaultLogger.info("inject done: injected=" + stat.methods + " methods (=" + stat.classes
-                    + " class-watches), scanned=" + totalMethods + " rows, tag=" + tag
-                    + ", waiting for first line hit");
+            FaultLogger.info("inject done: injected=" + injectedMethods + " methods, scanned="
+                    + totalMethods + " rows, tag=" + tag + ", waiting for first line hit");
         } catch (Throwable t) {
             // 模块内自行兜住所有致命异常：表4 留痕后直接 kill（不依赖 sandbox/agent 传递）
             FaultLogger.error("inject failed, kill process per policy", t);

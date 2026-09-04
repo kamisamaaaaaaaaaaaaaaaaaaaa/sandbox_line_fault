@@ -145,7 +145,7 @@ ORDER BY class_name, method_name, line_no, thread_name;
 | O2 | `t_class_method` 重载行落库与 `desc_hash`（tag=ov-v2） | ✅ | `Overloaded.target` 两行（`(I)J` / `(Ljava/lang/String;)J`），`desc_hash` 与 `SUBSTR(MD5(method_desc),1,16)` 一致（match=true） |
 | O3 | `t_fault_record.method_desc` 区分重载 | ✅ | `(Ljava/lang/String;)J` 的记录行号 18-24、`(I)J` 的 28-34，各 28 条（7 行 × 4 线程）；在 `t_class_method` 中匹配不到的记录数 = 0 |
 | O4 | 跨批去重（`inject.batch.size=1`，每个方法名必然跨批，tag=ov-v3） | ✅ | 17 条 `batch registered` 日志的 `cursor` 严格递增、每个 `(class_name, method_name)` 只出现一次；`inject done: injected=1 methods`（无重复注册）；命中 56 次、行号 18-24 与 28-34 各 4 次，**覆盖范围与去重前一致** |
-| O6 | 注入故障数统计（全量注入，tag=rg-v3） | ✅ | `inject done: injected=17 methods (=5 class-watches), scanned=18 rows`——18 行中 `Overloaded.target` 的 2 个重载行只注入 1 个方法名，差值正确体现去重 |
+| O6 | 注入统计口径（多批场景，`inject.batch.size=3`，tag=rg-v4） | ✅ | 逐批日志 `batch registered: scanned=3 rows, classes=C, injected=N methods, cursor=...` 同时给出 Class 级与方法级信息；首批 `scanned=3 rows, classes=1, injected=2 methods`（3 行中 `Overloaded.target` 的 2 个重载行只注入 1 个方法名）。汇总 `inject done: injected=17 methods, scanned=18 rows` 只含方法级与扫描行数 |
 | O5 | 重解析幂等（单元置回 pending 触发重新解析，tag=ov-v4） | ✅ | `t_class_method` 行数仍 18（未翻倍）、单元回到 completed、唯一键重复组数 = 0 |
 
 载荷说明：`stress-app` 新增 `cn.stress.Overloaded`（两个 `target` 重载，行号范围刻意错开），`StressWorker.run()` 每轮调用两个重载。
