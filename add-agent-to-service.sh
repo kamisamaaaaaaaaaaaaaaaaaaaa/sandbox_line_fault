@@ -5,7 +5,8 @@
 #
 # 做的事：
 #   1) 删除重启次数限制行（StartLimitIntervalSec / StartLimitInterval / StartLimitBurst）
-#   2) ExecStart 的 java 命令插入 -javaagent=<agentJar>（已有则替换其值，幂等）
+#   2) ExecStart 的 java 命令插入 -javaagent:<agentJar>（已有则整参替换——包括原有的
+#      agentArgs，幂等；旧式的 -javaagent= 等号写法是 JVM 非法参数，会被一并纠正为冒号）
 #   3) 提供第 3 个参数时，写入/替换 -Dfault.tag=<tag>（幂等）；不提供则仅输出提醒
 #
 # 修改前自动备份为 <service>.bak.<时间戳>；改完需 systemctl daemon-reload + restart 生效。
@@ -47,11 +48,13 @@ else
 fi
 
 # --- 2) ExecStart 插入/替换 -javaagent ---
-if grep -Eq '^[[:space:]]*ExecStart=.*-javaagent=' "$SERVICE_FILE"; then
-    sed -i -E "s|(^[[:space:]]*ExecStart=.*)-javaagent=[^[:space:]]+|\1-javaagent=${AGENT_ESC}|" "$SERVICE_FILE"
+# JVM 语法为 -javaagent:<jarpath>[=<options>]，jar 路径前必须用冒号；
+# [:] 同时匹配旧的等号错误写法（-javaagent=），替换后统一纠正为冒号
+if grep -Eq '^[[:space:]]*ExecStart=.*-javaagent[:=]' "$SERVICE_FILE"; then
+    sed -i -E "s|(^[[:space:]]*ExecStart=.*)-javaagent[:=][^[:space:]]+|\1-javaagent:${AGENT_ESC}|" "$SERVICE_FILE"
     echo "已替换 ExecStart 中原有的 -javaagent"
 elif grep -Eq '^[[:space:]]*ExecStart=' "$SERVICE_FILE"; then
-    sed -i -E "s|(^[[:space:]]*ExecStart=[^[:space:]]*java)([[:space:]])|\1 -javaagent=${AGENT_ESC}\2|" "$SERVICE_FILE"
+    sed -i -E "s|(^[[:space:]]*ExecStart=[^[:space:]]*java)([[:space:]])|\1 -javaagent:${AGENT_ESC}\2|" "$SERVICE_FILE"
     echo "已在 ExecStart 的 java 命令后插入 -javaagent"
 else
     echo "错误: 未找到 ExecStart 行: $SERVICE_FILE"
@@ -64,13 +67,13 @@ if [ -n "$TAG" ]; then
         sed -i -E "s|(^[[:space:]]*ExecStart=.*)-Dfault\.tag=[^[:space:]]+|\1-Dfault.tag=${TAG_ESC}|" "$SERVICE_FILE"
         echo "已替换 ExecStart 中原有的 -Dfault.tag"
     else
-        sed -i -E "s|(^[[:space:]]*ExecStart=.*-javaagent=[^[:space:]]+)|\1 -Dfault.tag=${TAG_ESC}|" "$SERVICE_FILE"
+        sed -i -E "s|(^[[:space:]]*ExecStart=.*-javaagent:[^[:space:]]+)|\1 -Dfault.tag=${TAG_ESC}|" "$SERVICE_FILE"
         echo "已在 -javaagent 后追加 -Dfault.tag=${TAG}"
     fi
 fi
 
 # --- 校验写入结果 ---
-if ! grep -Fq -- "-javaagent=${AGENT_JAR}" "$SERVICE_FILE"; then
+if ! grep -Fq -- "-javaagent:${AGENT_JAR}" "$SERVICE_FILE"; then
     echo "错误: -javaagent 修改未生效，已保留备份 $BACKUP"
     exit 1
 fi
