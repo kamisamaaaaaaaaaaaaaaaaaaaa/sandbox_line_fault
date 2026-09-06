@@ -42,8 +42,8 @@ final class ParseOrchestrator {
         List<Long> unitIds = new ArrayList<>();
 
         try {
-            BootJarParser.parse(java.nio.file.Paths.get(bootJarPath), config.libWhitelist(),
-                    (unitType, sourceJar, sha256) -> {
+            BootJarParser.parse(java.nio.file.Paths.get(bootJarPath), config.parseClassesEnabled(),
+                    config.libWhitelist(), (unitType, sourceJar, sha256) -> {
                         checkDeadline(deadline, bootJarPath);
                         UnitRegistration reg = registerUnit(recordDao, unitType, sha256, sourceJar, bootJarPath);
                         unitIds.add(reg.unitId);
@@ -60,8 +60,19 @@ final class ParseOrchestrator {
             throw e;
         } catch (RuntimeException e) {
             throw HardProtectException.exception("PARSE", "parse bootJar failed: " + e.getMessage(),
-                    FaultAgent.stackOf(e), null, bootJarPath);
+                    AgentBootstrap.stackOf(e), null, bootJarPath);
         }
+        if (unitIds.isEmpty()) {
+            // 本轮一个解析单元都没有：典型原因是关闭了 classes 解析、而 lib 白名单又没匹配到任何 jar。
+            // 此时继续启动会得到一个「挂载了但零覆盖」的空跑进程，绝不放行。
+            throw HardProtectException.exception("PARSE",
+                    "no parse unit for this round: parse.classes.enabled=" + config.parseClassesEnabled()
+                            + ", lib.whitelist=" + config.libWhitelist()
+                            + "（两者不可同时为空：请至少保留 classes 解析或让白名单匹配到 jar）",
+                    null, null, bootJarPath);
+        }
+        FaultLogger.info("parse units: count=" + unitIds.size() + " ids=" + unitIds
+                + "（classes=" + config.parseClassesEnabled() + "）");
         return unitIds;
     }
 
@@ -83,7 +94,7 @@ final class ParseOrchestrator {
             throw e;
         } catch (RuntimeException e) {
             throw HardProtectException.exception("DB", "register unit failed: " + e.getMessage(),
-                    FaultAgent.stackOf(e), null, bootJarPath);
+                    AgentBootstrap.stackOf(e), null, bootJarPath);
         }
     }
 
@@ -161,7 +172,7 @@ final class ParseOrchestrator {
                 methodDao.batchInsertSkipConflict(unitId, buffer);
             } catch (RuntimeException e) {
                 throw HardProtectException.exception("DB", "store unit failed: " + e.getMessage(),
-                        FaultAgent.stackOf(e), Collections.singletonList(unitId), bootJarPath);
+                        AgentBootstrap.stackOf(e), Collections.singletonList(unitId), bootJarPath);
             }
             buffer.clear();
         }

@@ -18,14 +18,15 @@ import java.util.zip.ZipInputStream;
 
 /**
  * bootJar 解析器（流式，不把全量方法驻留内存）：
- * 1) BOOT-INF/classes/ 整体一个解析单元（hash = 条目聚合）；
+ * 1) BOOT-INF/classes/ 整体一个解析单元（hash = 条目聚合；可由 parse.classes.enabled=false 关闭）；
  * 2) BOOT-INF/lib/ 中命中白名单的每个 jar 各一个单元（hash = 字节流）；
  *
  * 每解析到一个单元先回调 {@link UnitHandler#beginUnit}：
  * 返回 sink 则开始流式解析该类内容（方法逐条 push，由调用方按批写库）；
  * 返回 null 则跳过该单元的内容解析（用于"已解析过"的快速跳过，省去 ASM 开销）。
- * 每个单元输出类-方法明细（方法名 + 描述符），排除 &lt;clinit&gt; 与 synthetic（lambda 除外）。
- * &lt;clinit&gt; 排除原因见 {@link #parseClass}：sandbox 侧硬编码不支持，收录无收益。
+ * 每个单元输出类-方法明细（方法名 + 描述符），
+ * 排除 &lt;clinit&gt;、abstract 方法、native 方法与 synthetic（lambda 除外）。
+ * 各排除原因见 {@link #parseClass}：收录后都得不到命中，只会虚增覆盖率分母。
  */
 public final class BootJarParser {
 
@@ -52,22 +53,37 @@ public final class BootJarParser {
         UnitSink beginUnit(String unitType, String sourceJar, String sha256);
     }
 
-    /** 解析 bootJar：classes 单元 + 全部白名单命中的 lib 单元（流式回调） */
-    public static void parse(Path bootJar, List<String> whitelist, UnitHandler handler) {
+    /**
+     * 解析 bootJar：classes 单元（可关闭）+ 全部白名单命中的 lib 单元（流式回调）。
+     *
+     * @param parseClasses 是否解析 BOOT-INF/classes（应用自身代码）；false 时连该单元的
+     *                     哈希计算一并跳过（它要遍历整个 classes 目录，不跳过就白算），
+     *                     应用代码既不解析也不注入故障
+     * @param whitelist   BOOT-INF/lib 白名单正则（对 jar 文件名全串匹配）；非法即抛，
+     *                    由上层 ParseOrchestrator 的 catch(RuntimeException) 转硬保护 PARSE
+     */
+    public static void parse(Path bootJar, boolean parseClasses, List<String> whitelist,
+                             UnitHandler handler) {
         try (ZipFile zip = new ZipFile(bootJar.toFile())) {
             // 1) BOOT-INF/classes 整体一个单元
-            String classesHash = JarHashUtil.sha256OfClassesDir(bootJar);
-            UnitSink classesSink = handler.beginUnit(UNIT_CLASSES, bootJar.getFileName().toString(), classesHash);
-            if (classesSink != null) {
-                for (String name : JarHashUtil.listClassesEntries(zip)) {
-                    try (InputStream in = zip.getInputStream(zip.getEntry(name))) {
-                        parseClass(in, name, classesSink);
+            if (parseClasses) {
+                String classesHash = JarHashUtil.sha256OfClassesDir(bootJar);
+                UnitSink classesSink =
+                        handler.beginUnit(UNIT_CLASSES, bootJar.getFileName().toString(), classesHash);
+                if (classesSink != null) {
+                    for (String name : JarHashUtil.listClassesEntries(zip)) {
+                        try (InputStream in = zip.getInputStream(zip.getEntry(name))) {
+                            parseClass(in, name, classesSink);
+                        }
                     }
+                    classesSink.finish();
                 }
-                classesSink.finish();
+            } else {
+                FaultLogger.info("classes unit skipped: parse.classes.enabled=false");
             }
 
-            // 2) BOOT-INF/lib 白名单单元
+            // 2) BOOT-INF/lib 白名单单元（正则预编译一次，避免每个 jar 重复编译）
+            Pattern[] whitelistPatterns = RegexPatterns.compile(whitelist, "lib.whitelist");
             for (Enumeration<? extends ZipEntry> en = zip.entries(); en.hasMoreElements(); ) {
                 ZipEntry entry = en.nextElement();
                 if (entry.isDirectory() || !entry.getName().startsWith(BOOT_LIB_PREFIX)
@@ -75,7 +91,7 @@ public final class BootJarParser {
                     continue;
                 }
                 String jarName = entry.getName().substring(BOOT_LIB_PREFIX.length());
-                if (!matchesWhitelist(jarName, whitelist)) {
+                if (!RegexPatterns.matchesAny(whitelistPatterns, jarName)) {
                     continue;
                 }
                 // 先用流算 hash（不把整个 lib jar 读入内存）
@@ -107,6 +123,9 @@ public final class BootJarParser {
      * ASM 解析单个 class：收集全部可注入方法，逐条 push 给 sink。
      * 排除 &lt;clinit&gt;（sandbox 在类结构收集阶段即硬编码排除它，收录也无法织入，
      * 只会制造永不命中的覆盖率盲区——已用独立应用实测确认）；
+     * 排除 abstract 方法（无 Code 属性，织入器匹配得到却无处插桩，注册后永不回调）；
+     * 排除 native 方法（织入时只产生 BEFORE/RETURN/THROWS 事件，不产生 LINE 事件，
+     * 而本模块只监听 beforeLine，注册后同样永不回调）；
      * synthetic 方法仅纳入 lambda（lambda$ 前缀，其体内为用户逻辑），
      * 其余 synthetic（bridge/access$ 转发）排除以避免重复命中。
      */
@@ -130,6 +149,17 @@ public final class BootJarParser {
                     if (synthetic && !isLambda) {
                         return null;
                     }
+                    // abstract 方法：class 文件里没有 Code 属性。sandbox 的织入器能匹配到它
+                    //（signCodes 命中），但没有方法体可插桩，注册后永不产生回调。
+                    // native 方法：sandbox 的 rewriteNativeMethod 会去掉 native 并生成代理方法，
+                    // 确实完成了织入，但只插 spyMethodOnBefore / spyMethodOnReturn / spyMethodOnThrows，
+                    // 不插 spyMethodOnLine——native 无 Code 属性也就没有 LineNumberTable，无行号可报
+                    //（对比 rewriteNormalMethod 重写了 visitLineNumber）。本模块只监听 beforeLine，
+                    // 故 native 注册后同样永不回调。
+                    // 两者收录都只会让表2 多出一批永不命中的行，虚增覆盖率分母。
+                    if ((access & Opcodes.ACC_ABSTRACT) != 0 || (access & Opcodes.ACC_NATIVE) != 0) {
+                        return null;
+                    }
                     // 描述符完整入库（TEXT 列，不入索引）；区分重载由 descHash 承担。
                     // 列宽不做预检：超限由数据库判定，异常时 JdbcHelper 的行级上下文会带出完整方法信息
                     sink.accept(new ClassMethodInfo(0L, 0L, className, name, desc,
@@ -141,26 +171,5 @@ public final class BootJarParser {
             // 单个 class 解析失败 = 解析结果不完整，按硬保护处理（宁可 kill 也不放过解析不完整的进程）
             throw new IllegalStateException("parse class failed: " + entryName + " - " + e.getMessage(), e);
         }
-    }
-
-    /** 白名单匹配：每项为正则表达式，对 jar 文件名全串匹配；非法正则跳过并告警 */
-    static boolean matchesWhitelist(String jarName, List<String> whitelist) {
-        if (whitelist == null) {
-            return false;
-        }
-        for (String regex : whitelist) {
-            String t = regex.trim();
-            if (t.isEmpty()) {
-                continue;
-            }
-            try {
-                if (Pattern.compile(t).matcher(jarName).matches()) {
-                    return true;
-                }
-            } catch (Exception e) {
-                FaultLogger.warn("invalid whitelist regex \"" + t + "\", skipped: " + e.getMessage());
-            }
-        }
-        return false;
     }
 }

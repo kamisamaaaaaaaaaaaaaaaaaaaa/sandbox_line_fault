@@ -81,15 +81,23 @@ JDK9 起 `-jar` 及其路径被归入 main 侧参数，不出现在 `RuntimeMXBe
 #### 3.1.2 解析粒度与注册口径
 
 - **粒度 = 解析单元**：`BOOT-INF/classes/` 整体一个单元，hash = 目录下全部 `.class` 条目按路径排序后内容聚合 SHA-256；白名单命中的每个 lib jar 各一个单元，hash = 字节流 SHA-256。任何类改动重打包后单元 hash 变化，自动触发重新解析。
+- **classes 单元可关闭**（`parse.classes.enabled`，默认 true）：置为 false 时该单元整体跳过——包括它的哈希计算（要遍历整个 classes 目录，不跳过就白算）——应用代码既不落表2 也不注入故障，对应"只对第三方组件做故障演练"的场景。此时单元集合可能为空（白名单也未命中任何 jar 时），直接硬保护 `PARSE`：一个"挂载了但零覆盖"的进程比启动失败更危险，因为它看起来一切正常。
 - **行号不入库**：sandbox 的 `beforeLine(advice, lineNum)` 回调自带行号，静态解析只需方法名 + 描述符；表2 的唯一索引 `uk(unit_id,class,method,desc_hash)` 配合裸 INSERT 冲突跳过实现幂等。
 - **流式解析 + 分批写库**：`BootJarParser` 以 `UnitSink` 回调逐条 push 方法，`UnitWriter` 累积到 `parse.batch.size` 即写库一次，单元结束 flush 剩余。内存占用为 O(一批方法 + 类名集合)，大项目不会打爆内存。
 - **已完成单元跳过内容解析**：`beginUnit` 返回 null 时跳过该单元的 ASM 解析（仍计算 hash 用于判定）。
-- **方法注册口径**（过滤在 `BootJarParser.parseClass` 内，按 `ACC_SYNTHETIC` 与方法名判定）：
+- **方法注册口径**（过滤在 `BootJarParser.parseClass` 内，按访问标志与方法名判定）：
   - **`<clinit>` 排除**：sandbox 在**类结构收集阶段**即硬编码排除（`ClassStructureImplByAsm$5$1.visitMethod` 中 `StringUtils.equals("<clinit>", name)` 成立时直接 `super.visitMethod`，不收集为 BehaviorStructure）→ 进不了 `signCodes`，织入器永不改写，**无配置开关**。解析器同步排除：收录只会让表2 多出永不命中的行，制造覆盖率盲区。
     > 注意与 `main` 的排除点不同：`main` 在 `UnsupportedMatcher.isJavaMainBehavior`（matching 阶段），`<clinit>` 在 `ClassStructureImplByAsm$5$1`（结构收集阶段）——两者都是硬编码，但从不同入口拦截。
+  - **abstract 方法排除**：接口声明的抽象方法、抽象类的 abstract 方法在 class 文件里**没有 Code 属性**。sandbox 的 `EventWeaver` 能匹配到它并构造改写适配器，但无方法体时 `onMethodEnter` / `visitLineNumber` 永远不会被调用，桩落不上去——注册后既不回调也不报错。收录只会虚增覆盖率分母，故解析阶段同步排除。
+  - **native 方法排除**：`rewriteNativeMethod` 会去掉 `ACC_NATIVE`、装上方法体并生成 `ACC_PRIVATE|ACC_NATIVE|ACC_FINAL` 代理方法，因此它**确实被织入了**——但只插 `spyMethodOnBefore` / `spyMethodOnReturn` / `spyMethodOnThrows`，**不插 `spyMethodOnLine`**（native 无 Code 属性，也就没有 LineNumberTable，没有行号可报；对比 `rewriteNormalMethod` 重写了 `visitLineNumber`）。本模块只监听 `beforeLine`，故 native 方法注册后同样永不回调，一并排除。
+    > 两者失败点不同：abstract 卡在「桩没插上」，native 卡在「桩插了但没有 LINE 事件」。若将来接入 BEFORE/RETURN 事件，需要重新评估 native 的取舍。
   - **synthetic 方法仅纳入 `lambda$` 前缀**：lambda 体内是用户逻辑；bridge / `access$xxx` 等转发型 synthetic 方法体 1-2 行且行号指向原声明处，hook 会与目标方法重复命中。
   > 排查提醒：确认这类过滤逻辑时**直接读 `BootJarParser` 源码**——关键词检索（`isSynthetic` / `clinit`）在 `Opcodes.ACC_SYNTHETIC` 与字符串常量上可能漏命中。
-- **注入阶段的名单过滤**：解析落表2 是全量的，名单只作用于注入阶段。对每个方法按 `"完全限定类名.方法名"` 先经 `inject.include.methods` 选入（名单为空则全部入选），再经 `exclude.methods` 排除，两者都过才注册 watch；过滤后若一个类都不剩，判定为零覆盖，写表4 后 kill。配置写法见 README。
+- **注入阶段的过滤块**（`inject.filters`）：解析落表2 是全量的，过滤只作用于注入阶段。判定方法属于哪个作用范围需要回到表1 取单元的 `unit_type` 与 `source_jar`——表2 只带 `unit_id`，单看方法无法区分它来自应用代码还是哪个第三方 jar，这是模块侧要在 inject 开始时额外查一次单元元信息的原因。
+  - 各块**按配置顺序串行作用**：作用范围不覆盖该方法所属单元的块不表态；范围覆盖的块内先 `include` 选入（空 = 全选）再 `exclude` 过滤，**任一块把方法拦下即不注入**。
+  - 于是范围互斥的块（`class` 与 `lib`）互不表态、各自管各自；范围重叠的块（`global` 与 `class`）需逐块过关——这就是"被任一块过滤掉就不能注入"的语义，与"取并集""首个命中块生效"都不相同。
+  - 单元元信息在 inject 开始时一次查完（单元数为个位数），正则在过滤前一次预编译；过滤是启动期一次性开销，不在 `beforeLine` 热路径上，不引入运行期成本。
+  - 过滤后若一个方法都不剩，判定为零覆盖，写表4 后 kill。配置写法见 README。
 
 #### 3.1.3 并发解析：两态 + 幂等收敛
 
@@ -238,7 +246,7 @@ sandbox 的 `onBehavior(String)` **只按方法名匹配**（API 另有 `withPar
   帧格式为 `类名.方法名(文件名:行号)`，可区分同一方法内的不同调用点。
 - **递归深度会影响故障机会数**：递归方法中的同一行在不同递归深度产生不同的 `stack_hash`，
   该行的故障机会数与递归深度正相关，`counters` / `exhausted` 的规模也随之增长。
-  需要收敛时用 `inject.include.methods` / `exclude.methods` 把递归方法排除在注入范围外。
+  需要收敛时用 `inject.filters` 块内的 `exclude` 把递归方法排除在注入范围外。
 - **只在 kill 前打印调用栈**：本节点赢得抢占时才打印；唯一键冲突放行分支会被反复执行，打印会造成日志膨胀。
 
 #### 3.3.5 织入边界（影响覆盖率口径）
@@ -253,28 +261,45 @@ sandbox 的织入有若干**不可注入**的行，覆盖率必须按"可达行"
 
 ### 3.4 类加载与依赖隔离
 
-#### 3.4.1 为什么只有 agent 需要 relocate
+#### 3.4.1 agent 用隔离 ClassLoader 替代依赖改写
 
-| | 加载位置 | 与宿主应用的关系 | 是否需要 relocate |
+| | 加载位置 | 与宿主应用的关系 | 隔离方式 |
 |---|---|---|---|
-| agent | **应用的父 loader**（`AppClassLoader`，`-javaagent` 的 jar 被 JVM 追加进 system classpath） | 应用按父优先委托，会**先命中 agent 带来的同名类** → 污染宿主依赖 | **必须** |
-| module | sandbox 独立创建的 `ModuleJarClassLoader`（未命中 routing 的类先在本地 jar 中 `findClass`，子优先） | 不在应用的委托链上，应用看不见它 | 不需要 |
+| agent | **应用的父 loader**（`AppClassLoader`，`-javaagent` 的 jar 被 JVM 追加进 system classpath） | 应用按父优先委托，会**先命中 agent 带来的同名类** → 污染宿主依赖 | 依赖收进嵌套 jar，由壳类自建的 `AgentClassLoader` 独占加载 |
+| module | sandbox 独立创建的 `ModuleJarClassLoader`（未命中 routing 的类先在本地 jar 中 `findClass`，子优先） | 不在应用的委托链上，应用看不见它 | 无需处理 |
 
-relocate 后，agent 的依赖在父 loader 中只以 `cn.chinaclear.fault.shaded.*` 的名字存在；应用请求的仍是 `com.google.common.*` 等原始包名，父 loader 中查不到，于是应用始终加载自己那份依赖，两者互不干扰。
+冲突的物理基础：`-javaagent` 把 agent jar 追加进 AppClassLoader 的搜索路径，而 `-jar` 启动时应用自己的 bootJar 也在其上——应用加载同名类时（无需 agent 先用过该类）委派到 AppClassLoader 就会命中 agent 那份，应用自己 lib 里的类永远加载不到。
 
-relocate 规则的命名约束见 README「agent fat jar 的 relocate 与命名规范」。
+**agent 的解法是让 AppClassLoader 的可见面上不存在依赖类**，两个机制配合：
+
+1. **依赖收进嵌套 jar**。外壳 jar 根上只放 premain 壳类（`FaultAgent`、`AgentClassLoader`，JVM 规范要求 premain 类对 system loader 可见），全部业务类与依赖打进外壳内的 `lib/agent-all.jar` entry——jar 套 jar 不是标准 classpath 形态，标准类加载器不递归进嵌套 entry，依赖类对外壳（AppClassLoader）完全不可见。仅自建 loader 而依赖仍平铺在外壳根上是不够的：AppClassLoader 不经过自建 loader 也能直接加载它们。
+2. **`AgentClassLoader` 的 parent 取 system loader 的父加载器**（JDK9+ platform / JDK8 ext）。委派链为嵌套 jar 自己 → platform/ext → bootstrap，三层都只有 JDK 模块类，应用 classpath 被整体跳过。不能取 AppClassLoader（隔离的成立与否就押在"应用恰好没有同名类"上）；也不能取 null——JDK9+ 的 `java.sql` / `java.management` 等非 base 模块类由 platform loader 加载，parent=null 只委派到 bootstrap，拿不到这些类（实测在 `SQLException` 上翻车）。
+
+结构示意（`FaultAgent.premain` 仅构造隔离 loader 并反射调用 `AgentBootstrap.run`，跨 loader 只传 JDK 类型；壳阶段失败 `System.err` 留痕后 `halt(137)`，绝不放行"隔离未建立却继续启动"的进程）：
+
+```
+fault-agent.jar（外壳）
+├── cn/chinaclear/fault/agent/FaultAgent.class          # 壳：premain 入口（AppClassLoader 加载）
+├── cn/chinaclear/fault/agent/AgentClassLoader.class    # 壳：隔离 ClassLoader
+├── lib/agent-all.jar                                   # 嵌套 core：业务类 + common + 全部依赖（原名）
+└── META-INF/MANIFEST.MF
+```
+
+隔离 loader 把嵌套 jar 全量读入内存后独立 `defineClass`（内存驻留换取零临时文件、无清理钩子——agent 命中即 `kill -9`，任何临时文件方案都要面对清理路径走不到的泄漏问题）。资源（`config.yml`）由 `findResource` 从内存 map 提供，用带显式 handler 的自定义协议 URL 返回可打开流的结果，不注册全局 `URLStreamHandlerFactory`（避免与应用争抢）。`defineClass` 附带指向嵌套 jar 的 `CodeSource`，日志可打印类来源。
+
+选择隔离 loader 而非依赖改写（shadow relocate）的原因：依赖类名保持原名，agent 与 module 的配置心智统一（`jdbc.driver` 两侧填同一个标准类名）；异常栈里的类名不再被改写得无法阅读；新增依赖不再需要同步维护改写规则。
+
+agent 与 sandbox module 仅通过 DB 表与进程调用交互，无跨 loader 共享类；agent 内新建线程（挂载输出读取等）继承隔离 loader 的 TCCL（`AgentBootstrap.run` 首行显式设置、返回时恢复）。
 
 #### 3.4.2 JDBC 驱动的加载方式
 
 驱动类名由 `jdbc.driver` 指定（必填，无内置兜底，加载失败即硬保护）。连接一律由 `JdbcHelper` 自己持有的 `Driver` 实例建立（`driver.connect`），**不经过 `DriverManager`**：
 
-- `DriverManager` 是 JVM 全局单例，按"注册顺序 + 对调用方 classloader 是否可见"挑选驱动。agent premain 注册的 shaded 驱动既排在前面、又经委托链（app classloader 持有 agent fat jar）对模块可见，模块会被它截胡，转而依赖 agent fat jar 的物理文件；该文件按需读类失败会直接打断模块的 JDBC 调用。
-- agent 与模块的 common 类相互独立（sandbox 模块类加载器子优先），两者各自持有自己的驱动实例与静态状态，互不干扰。
-- `Class.forName` 未显式指定加载器，使用调用类 `JdbcHelper` 的定义类加载器，因此两侧各自在自己的 jar 内解析。
+- `DriverManager` 是 JVM 全局单例，按"注册顺序 + 对调用方 classloader 是否可见"挑选驱动。agent premain 注册的驱动既排在前面、又经委托链对模块可见，模块会被它截胡，转而依赖 agent 的物理文件；该文件按需读类失败会直接打断模块的 JDBC 调用。
+- agent 与模块的 common 类相互独立（agent 侧在隔离 loader、模块在 sandbox 子优先 loader），两者各自持有自己的驱动实例与静态状态，互不干扰。
+- `Class.forName` 未显式指定加载器，使用调用类 `JdbcHelper` 的定义类加载器，因此两侧各自在自己 loader 内解析。
 
-**两侧配置值不同**：agent fat jar 内的依赖已被 relocate，jar 中不存在原包名的驱动类，故 agent 侧 `config.yml` 填 relocate 后的类名、module 侧填驱动的标准类名。
-
-两侧各填自己 jar 内真实存在的类名，由配置显式声明。shadow 的 relocate 只改写类文件（含其中的字符串常量），`config.yml` 属资源文件不受影响，因此驱动名只能由配置直接给出。
+**两侧配置值一致**：agent 依赖在隔离 loader 内加载、类名保持原名，agent 与 module 侧 `jdbc.driver` 统一填驱动的标准类名。
 
 #### 3.4.3 不引入日志门面
 

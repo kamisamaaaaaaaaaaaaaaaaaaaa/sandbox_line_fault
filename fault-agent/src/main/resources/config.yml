@@ -1,4 +1,6 @@
-# fault-agent 配置（YAML，可被 -javaagent:fault-agent.jar=k1=v1,k2=v2 覆盖）
+# fault-agent 配置（YAML，唯一配置来源。-javaagent 的 agentArgs 覆盖写法已不支持：写了会被忽略）
+# 注意：写了键就必须给值——冒号后无值、空字符串、空列表项都属于配置非法，启动即硬保护；
+#      不需要的配置项请删除整行，不要留下没有值的键。
 # 应用必须以 -jar 方式启动（bootJar 自动从启动参数定位）
 #
 # 本文件只保留**必填项**；有默认值的配置一律注释，按需取消注释并修改（用法见各条注释）。
@@ -10,10 +12,9 @@ jdbc:
   username: root
   password: root123
   # JDBC 驱动类名（必填，无内置兜底，加载失败即硬保护 kill）
-  # **agent 侧必须填 relocate 后的类名**：agent fat jar 内的第三方依赖已被 shadow relocate
-  # （规则见 fault-agent/build.gradle），jar 中不存在原包名的驱动类
+  # 填驱动的标准类名：agent 依赖在隔离 ClassLoader 内加载、类名保持原名，与 module 侧写法一致
   # 换数据库时改这一项，完整步骤见 README「更换数据库」
-  driver: cn.chinaclear.fault.shaded.mysql.cj.jdbc.Driver
+  driver: com.mysql.cj.jdbc.Driver
 
 # sandbox 工具安装目录（挂载脚本位于其 bin/sandbox.sh）
 # 无默认值：mount.enabled=true 时必填，缺失在解析开始前即硬保护
@@ -29,29 +30,36 @@ sandbox:
 #   whitelist:
 #     - test-lib.*
 
-# mount:
-#   # 是否挂载故障模块：true = 解析后自动挂载并注入故障
-#   #                 false = 纯解析模式（只落库，应用正常启动，不挂载不注入）
-#   # 默认值：true
-#   enabled: true
-
-# premain:
+# parse:
+#   # 是否解析 BOOT-INF/classes（应用自身代码）
+#   #   true（默认）= 应用代码与第三方 lib 都解析
+#   #   false        = 只解析 lib.whitelist 命中的第三方 jar，应用代码既不解析也不注入故障
+#   # 置为 false 且白名单未匹配到任何 jar 时，本轮解析单元为空 → 硬保护 PARSE
+#   classes:
+#     enabled: true
 #   # 解析阶段超时（定位 bootJar 后的登记+解析+落库，含异机 pending 等待），毫秒
 #   # 默认值：900000（15 分钟）
-#   parse:
-#     timeout:
-#       ms: 900000
-#   # 挂载阶段超时（sandbox attach + 模块 inject + watch 注册），毫秒，与解析阶段各自独立计时
-#   # 默认值：1200000（20 分钟）
-#   mount:
-#     timeout:
-#       ms: 1200000
+#   timeout:
+#     ms: 900000
 #   # 解析结果分批写库的批大小（流式解析，方法不驻留内存）
 #   # 默认值：2000；大项目内存敏感可下调（如 500）
 #   batch:
 #     size: 2000
 
+# mount:
+#   # 是否挂载故障模块：true = 解析后自动挂载并注入故障
+#   #                 false = 纯解析模式（只落库，应用正常启动，不挂载不注入）
+#   # 默认值：true
+#   enabled: true
+#   # 挂载阶段超时（sandbox attach + 模块 inject + watch 注册），毫秒，与解析阶段各自独立计时
+#   # 默认值：1200000（20 分钟）
+#   timeout:
+#     ms: 1200000
+
 # log:
 #   # 日志目录（相对路径基于目标进程工作目录，也可设绝对路径如 /var/log/fault）
 #   # 默认值：logs
 #   dir: logs
+#   # 日志级别阈值：DEBUG / INFO / WARN / ERROR（忽略大小写），低于阈值的日志不输出
+#   # 默认值：INFO
+#   level: INFO

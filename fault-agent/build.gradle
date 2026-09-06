@@ -1,5 +1,7 @@
-// premain agent：fat jar；依赖会被加入目标应用 system classpath，
-// 因此 mysql/asm/protobuf 全部 relocate 隔离，避免与应用依赖冲突
+// premain agent：壳 + 嵌套 core jar 的单文件 fat jar，部署形态不变。
+// 依赖不做 relocate：-javaagent 会把外壳 jar 加入 AppClassLoader 的搜索路径，但依赖全部收进
+// 嵌套 entry lib/agent-all.jar（AppClassLoader 不会递归进嵌套 jar），运行期由壳类 AgentClassLoader
+// 独占加载——与应用依赖物理隔离，jdbc.driver 两侧统一填驱动标准类名（见 README 第 5 章）。
 apply plugin: 'com.gradleup.shadow'
 
 dependencies {
@@ -12,7 +14,24 @@ tasks.withType(JavaCompile).configureEach {
 
 jar.enabled = false
 
+// core jar：agent 业务类（含 AgentBootstrap）+ common + 全部依赖（不 relocate），整包嵌入外壳。
+// 输出到 intermediates：它是纯中间产物（无壳类、无 Premain-Class，不能 -javaagent），
+// 不与部署产物混在 build/libs，避免误取
 shadowJar {
+    archiveClassifier = 'core'
+    destinationDirectory = layout.buildDirectory.dir('intermediates/agent-core')
+}
+
+// 外壳 jar：根上只放 premain 壳类与嵌套 core，暴露面最小化（壳类对 AppClassLoader 可见）。
+// 注意 AgentClassLoader 的内部类/匿名类必须一并放行——壳构造过程（构造 CodeSource 的 URL
+// handler）就会触发它们的加载，缺了直接 NoClassDefFoundError。
+def shellClasses = [
+        'cn/chinaclear/fault/agent/FaultAgent.class',
+        'cn/chinaclear/fault/agent/AgentClassLoader.class',
+        'cn/chinaclear/fault/agent/AgentClassLoader$*.class',
+]
+
+tasks.register('agentShellJar', Jar) {
     archiveClassifier = ''
     manifest {
         attributes(
@@ -20,11 +39,16 @@ shadowJar {
                 'Can-Retransform-Classes': 'false'
         )
     }
-    relocate 'com.mysql', 'cn.chinaclear.fault.shaded.mysql'
-    relocate 'com.google.protobuf', 'cn.chinaclear.fault.shaded.protobuf'
-    relocate 'org.objectweb.asm', 'cn.chinaclear.fault.shaded.asm'
-    relocate 'com.google.common', 'cn.chinaclear.fault.shaded.guava'
-    relocate 'org.yaml.snakeyaml', 'cn.chinaclear.fault.shaded.snakeyaml'
+    from(sourceSets.main.output) {
+        include shellClasses
+    }
+    into('lib') {
+        from(tasks.shadowJar.archiveFile) {
+            rename { 'agent-all.jar' }
+        }
+    }
 }
 
-build.dependsOn shadowJar
+build.dependsOn tasks.named('agentShellJar')
+// assemble 默认只挂 jar/shadowJar；显式挂上，保证 gradlew assemble 也产出可部署的外壳 jar
+tasks.named('assemble') { dependsOn tasks.named('agentShellJar') }

@@ -1,4 +1,6 @@
 # fault-module 配置（sandbox 模块侧连库：读表1/表2、写表3/表4）
+# 注意：写了键就必须给值——冒号后无值、空字符串、空列表项都属于配置非法，启动即硬保护；
+#      不需要的配置项请删除整行，不要留下没有值的键。
 #
 # 本文件只保留**必填项**；有默认值的配置一律注释，按需取消注释并修改（用法见各条注释）。
 # 完整说明见 README「三、配置说明」。
@@ -9,7 +11,7 @@ jdbc:
   username: root
   password: root123
   # JDBC 驱动类名（必填，无内置兜底，加载失败即硬保护 kill）
-  # **module 侧填驱动的标准类名**：模块 jar 未做 relocate，包名为驱动原始包名
+  # 填驱动的标准类名，与 agent 侧写法一致（agent 依赖在隔离 ClassLoader 内加载、类名保持原名）
   # 换数据库时改这一项，完整步骤见 README「更换数据库」
   driver: com.mysql.cj.jdbc.Driver
 
@@ -27,23 +29,36 @@ inject:
   # batch:
   #   size: 5000
 
-  # 注入名单：方法正则，全串匹配 "完全限定类名.方法名"，一行一个（"- " 开头）
-  # 默认值：空列表 = 所有已解析方法都是注入候选
-  # 注入整类写：cn\.demo\.OrderService\..*
-  # 过滤顺序：先按 include 选入，再按 exclude 排除，两者都过才注入
-  # 若过滤后一个类都不剩（名单与解析结果无交集），判定零覆盖，写表4 后 kill
-  # include:
-  #   methods:
-  #     - cn\.demo\.service\..*
-
-# 注入排除：方法正则，全串匹配 "完全限定类名.方法名"，作用于 include 选入之后的方法
-# 默认值：空列表 = 不排除任何方法
-# 排除整类写：cn\.demo\.SafeService\..*
-# exclude:
-#   methods:
-#     - cn\.demo\.SafeService\..*
+  # 过滤块：按配置顺序串行作用，任一块把方法拦下（include 未命中或 exclude 命中）即不注入。
+  # 不配置 filters（删除整行）= 所有已解析方法都是注入候选。
+  #   scope   global = 作用于全部方法
+  #           class  = 只作用于 BOOT-INF/classes 的应用自身代码
+  #           lib    = 只作用于第三方 jar，再用 libs 指定作用在哪些 jar
+  #   libs    仅 scope=lib 生效；jar 文件名正则全串匹配（与 agent 侧 lib.whitelist 同构）；
+  #           块内不配置 libs = 作用于全部第三方 jar，不限具体 jar
+  #   include 块内不配置 = 全选，该块覆盖范围内的方法全部通过
+  #   exclude 块内不配置 = 不排除任何方法
+  #   include 与 exclude 都不配置 = 该块放行其覆盖范围内的全部方法（不是"该块不注入"）；
+  #           若想更显眼地表达放行意图，可写 include: ['.*']，与不配置完全等价
+  #   名单    libs / include / exclude 三处均为一行一个 "- " 开头的 YAML 列表；
+  #           方法正则对 "完全限定类名.方法名" 全串匹配；正则用单引号包裹
+  # 若过滤后一个方法都不剩（名单与解析结果无交集），判定零覆盖，写表4 后 kill
+  # filters:
+  #   - scope: class
+  #     include:
+  #       - 'cn\.demo\.service\..*'
+  #     exclude:
+  #       - 'cn\.demo\.service\.Safe\..*'
+  #   - scope: lib
+  #     libs:
+  #       - 'newclear-framework-.*\.jar'
+  #     include:
+  #       - 'com\.newclear\..*'
 
 # log:
 #   # 模块日志目录（相对路径基于目标进程工作目录，与 agent 的 log.dir 互不影响）
 #   # 默认值：logs
 #   dir: logs
+#   # 日志级别阈值：DEBUG / INFO / WARN / ERROR（忽略大小写），低于阈值的日志不输出。
+#   # 默认值：INFO（故障命中 FAULT HIT 为 INFO 永远输出；多节点抢空的 already preempted 为 DEBUG 静默）
+#   level: INFO

@@ -49,7 +49,7 @@ final class SandboxMountInvoker {
         }
         String home = config.sandboxHome();
         String script = home + "/bin/sandbox.sh";
-        String ids = FaultAgent.joinIds(unitIds);
+        String ids = AgentBootstrap.joinIds(unitIds);
         String bootJarEncoded;
         try {
             bootJarEncoded = java.net.URLEncoder.encode(bootJarPath, "UTF-8");
@@ -119,11 +119,11 @@ final class SandboxMountInvoker {
             }
         } catch (IOException e) {
             throw HardProtectException.exception("MOUNT", "sandbox.sh exec failed: " + e.getMessage(),
-                    FaultAgent.stackOf(e), null, bootJarPath);
+                    AgentBootstrap.stackOf(e), null, bootJarPath);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             throw HardProtectException.exception("MOUNT", "sandbox.sh wait interrupted",
-                    FaultAgent.stackOf(e), null, bootJarPath);
+                    AgentBootstrap.stackOf(e), null, bootJarPath);
         }
     }
 

@@ -56,16 +56,20 @@
 | 模块 | 内容 |
 |---|---|
 | `common` | 公共代码：解析器、JDBC/DAO、配置、日志、kill 工具、`schema.sql` |
-| `fault-agent` | **agent**（premain 定位/解析/落库/挂载），fat jar 内第三方依赖已 shadow relocate 到 `cn.chinaclear.fault.shaded.*` |
-| `fault-module` | **sandbox 模块**（inject 命令 + 行级监听），运行在 sandbox 独立 classloader，无需 relocate |
+| `fault-agent` | **agent**（premain 定位/解析/落库/挂载），单文件 fat jar：壳类 + 嵌套 core jar（`lib/agent-all.jar`），依赖由壳类的隔离 ClassLoader 独占加载（见 [5.7](#57-agent-隔离类加载嵌套-jar)） |
+| `fault-module` | **sandbox 模块**（inject 命令 + 行级监听），运行在 sandbox 独立 classloader，与宿主依赖天然隔离 |
 
 ```bash
 # Windows（项目根目录）
-gradlew.bat :fault-agent:shadowJar :fault-module:shadowJar
+gradlew.bat :fault-agent:agentShellJar :fault-module:shadowJar
 
 # Linux
-./gradlew :fault-agent:shadowJar :fault-module:shadowJar
+./gradlew :fault-agent:agentShellJar :fault-module:shadowJar
 ```
+
+> agent 的部署产物是 `fault-agent/build/libs/fault-agent-1.0.0.jar`（外壳，由 `agentShellJar` 组装）。
+> 被嵌入外壳的 core jar（无壳类、无 Premain-Class，不能直接 `-javaagent`）输出到
+> `build/intermediates/agent-core/`，属构建中间产物，不出现在 `build/libs`。
 
 ### 依赖仓库配置（内网部署）
 
@@ -136,11 +140,11 @@ agent 启动时只校验表与列是否存在，**不会自动建表或加列**�
 
 ## 5. 配置
 
-### 5.1 加载与覆盖规则
+### 5.1 加载规则
 
-- 配置随 fat jar 内置，读 classpath 下的 `config.yml`（YAML，支持嵌套分组，展平为点分键读取）。
-- **agent 侧**额外支持启动参数覆盖：`-javaagent:fault-agent.jar=键=值,键2=值2`（多个用逗号分隔）；模块侧不支持。
-- **缺失或非法即硬保护**：`config.yml` 不存在，或 YAML 语法错误，或必填项缺失，进程都会被 kill，不做"用内置默认值静默降级"。
+- 配置随 fat jar 内置，读 classpath 下的 `config.yml`（YAML，支持嵌套分组，展平为点分键读取），这是配置的**唯一来源**。
+- **agentArgs 覆盖写法已不支持**：`-javaagent:fault-agent.jar=键=值,键2=值2` 这种写法传了也会被**忽略**，不会生效、也不报错。配置只能写进 `config.yml`。
+- **缺失或非法即硬保护**：`config.yml` 不存在，YAML 语法错误，必填项缺失，或配置项写了却没值，进程都会被 kill，不做"用内置默认值静默降级"。
 
 ### 5.2 agent 配置项
 
@@ -149,14 +153,16 @@ agent 启动时只校验表与列是否存在，**不会自动建表或加列**�
 | `jdbc.url` | 是 | — | 故障库连接串（已含 5s/10s 连接超时，勿随意去掉） |
 | `jdbc.username` | 是 | — | 数据库用户 |
 | `jdbc.password` | 是 | — | 数据库密码 |
-| `jdbc.driver` | 是 | — | **JDBC 驱动类名，须填 relocate 后的名字**（如 `cn.chinaclear.fault.shaded.mysql.cj.jdbc.Driver`）。无内置兜底，加载失败即硬保护。见 [5.7](#57-agent-侧-relocate-与驱动名的对应关系) |
+| `jdbc.driver` | 是 | — | **JDBC 驱动的标准类名**（如 `com.mysql.cj.jdbc.Driver`），与 module 侧写法一致。无内置兜底，加载失败即硬保护。见 [5.7](#57-agent-隔离类加载嵌套-jar) |
 | `sandbox.home` | `mount.enabled=true` 时必填 | — | sandbox 安装目录（取其 `bin/sandbox.sh`）。缺失在解析开始前即硬保护，不会白跑解析 |
+| `parse.classes.enabled` | 否 | **`true`** | 是否解析 `BOOT-INF/classes/`（应用自身代码）。`false` = 只解析 `lib.whitelist` 命中的第三方 jar，应用代码既不解析也不注入故障。见 [5.5](#55-解析范围与注入范围) |
 | `lib.whitelist` | 否 | **空列表**（不解析任何 lib） | `BOOT-INF/lib/` 中需要解析的 jar 文件名，正则表达式（对文件名全串匹配），YAML 列表一行一个 |
 | `mount.enabled` | 否 | **`true`** | `false` = 纯解析模式（只落库，应用正常启动，不挂载不注入） |
 | `parse.timeout.ms` | 否 | **`900000`**（15 分钟） | 解析阶段总预算：登记+解析+落库，超时即硬保护 |
 | `mount.timeout.ms` | 否 | **`1200000`**（20 分钟） | 挂载阶段超时，与解析阶段各自独立计时 |
 | `parse.batch.size` | 否 | **`2000`** | 解析结果分批写库的批大小（流式解析，方法不驻留内存） |
 | `log.dir` | 否 | **`logs`** | 日志目录（相对路径基于目标进程工作目录，也可设绝对路径） |
+| `log.level` | 否 | **`INFO`** | 日志级别阈值：`DEBUG` / `INFO` / `WARN` / `ERROR`（忽略大小写），低于阈值的日志 stdout 与文件都不输出；非法值配置非法（硬保护）。全量日志清单见 [7](#7-日志速查) |
 
 ### 5.3 module 配置项
 
@@ -165,38 +171,121 @@ agent 启动时只校验表与列是否存在，**不会自动建表或加列**�
 | `jdbc.url` | 是 | — | 故障库连接串，须与 agent 指向同一库 |
 | `jdbc.username` | 是 | — | 数据库用户 |
 | `jdbc.password` | 是 | — | 数据库密码 |
-| `jdbc.driver` | 是 | — | **JDBC 驱动类名，填驱动的标准类名**（如 `com.mysql.cj.jdbc.Driver`）。模块 jar 未做 relocate。无内置兜底 |
+| `jdbc.driver` | 是 | — | **JDBC 驱动的标准类名**（如 `com.mysql.cj.jdbc.Driver`），与 agent 侧写法一致。无内置兜底，加载失败即硬保护 |
 | `inject.fault.times` | 否 | **`1`** | **每行每线程每调用栈故障次数**（≥1）。同一行在同一线程、经同一调用栈执行时本轮最多发生多少次故障；该行被 T 个线程、S 种调用栈执行时本轮最多 T × S × N 次。填入 <1 的值即硬保护 |
 | `inject.batch.size` | 否 | **`5000`** | 分批读取方法清单的批大小（避免大项目一次性读入打爆内存） |
-| `inject.include.methods` | 否 | **空列表**（所有已解析方法都是注入候选） | 注入名单，方法正则，见 [5.5](#55-注入名单与排除名单) |
-| `exclude.methods` | 否 | **空列表**（不排除任何方法） | 注入排除，方法正则，见 [5.5](#55-注入名单与排除名单) |
+| `inject.filters` | 否 | **空列表**（所有已解析方法都是注入候选） | 注入过滤块：按作用范围（global / class / lib）分块配置选入与排除，按配置顺序串行作用。见 [5.5](#55-解析范围与注入范围) |
 | `log.dir` | 否 | **`logs`** | 模块日志目录，与 agent 的 `log.dir` 互不影响 |
+| `log.level` | 否 | **`INFO`** | 日志级别阈值，语义与 agent 侧一致。故障命中 `FAULT HIT & PREEMPTED` 为 INFO（永远输出）；多节点抢空的 `already preempted` 为 DEBUG（默认静默） |
 
 > 配置模板中**只保留必填项**，有默认值的配置全部注释并附用法说明，按需取消注释修改。
 
 ### 5.4 正则写法
 
-`lib.whitelist`、`inject.include.methods`、`exclude.methods` 规则相同：
+`lib.whitelist` 与 `inject.filters` 下的 `libs` / `include` / `exclude` 规则相同：
 
 - 均为 **Java 正则，全串匹配**；`.` 是通配符，表示字面量的点请写 `\.`（不转义也能匹配，但会放宽，如 `OrderService` 会连 `OrderXService` 一起匹配）。
-- **推荐列表项不加引号直接写 `\.`**；若加双引号必须双写反斜杠 `- "cn\\.demo\\..*"`，否则 YAML 扫描报错（`while scanning a double-quoted scalar`）。
-- 非法正则会被跳过并告警，不会导致硬保护。
+- 名单一律写成一行一个 `- ` 开头的 YAML 列表。减号与值之间的空格数量、值首尾空白都不影响解析（读取时会 trim）。缩进只要求同层一致，**不可用 Tab**。
+- **正则一律用单引号包裹**，如 `- 'cn\.demo\..*'`。原因见下表。
+- **非法正则即硬保护**（写表4 后 kill），不做"跳过该条继续跑"的降级：正则写错会让名单部分失效，`exclude` 写错更会造成超范围注入，静默降级的代价是覆盖不完整而不自知。
 
-### 5.5 注入名单与排除名单
+**正则的三种引号写法**
 
-解析阶段按 `lib.whitelist` **全量落表2**，名单只作用于注入阶段（注册 watch 前）。对每个方法按 `"完全限定类名.方法名"` 依次判定：
+| 写法 | YAML 对 `\` 的处理 | 结论 |
+|---|---|---|
+| `- 'cn\.demo\..*'`（单引号） | 原样保留 | **推荐** |
+| `- cn\.demo\..*`（不加引号） | 原样保留 | 多数情况能用，但有例外（见下） |
+| `- "cn\.demo\..*"`（双引号） | 当作转义符 | **不可用**：`\.` 是非法转义，要么扫描报错，要么吞掉反斜杠、悄悄改掉正则语义 |
 
+不加引号时，正则里出现以下情况会出问题：以 `*`、`&`、`!`、`%`、`@`、`` ` `` 开头（被当别名/锚点/标签/指令）；
+含 `: `（冒号+空格，被解析成键值对）；含 ` #`（被当注释截断）；以引号开头。
+统一加单引号就不必记这些例外。
+
+### 5.5 解析范围与注入范围
+
+**解析范围**（agent 侧）。解析单元分两类：`BOOT-INF/classes/` 整体一个单元（应用自身代码），
+`BOOT-INF/lib/` 中命中 `lib.whitelist` 的每个 jar 各一个单元（第三方依赖）。
+
+- `parse.classes.enabled: false` 时 classes 单元不再解析（连它的哈希计算一并跳过），应用代码既不落表2 也不注入故障——对应"只对第三方组件做故障演练"的场景。
+- **该开关与白名单不可同时为空**：若关闭了 classes 解析、`lib.whitelist` 又没匹配到任何 jar，本轮一个解析单元都没有，直接硬保护 `PARSE`。不放行"挂载了却零覆盖"的进程。
+- classes 单元关闭后，表1 里历史遗留的 CLASSES 单元行仍然存在，只是不在本轮单元清单里，模块不会注入它。本轮生效的单元清单会打印为 `unit: id=... type=... source=...`。
+
+**注入范围**（module 侧）。解析落表2 是全量的，过滤只作用于注入阶段（注册 watch 前）。
+`inject.filters` 下可配置若干个块，**按配置顺序串行作用**：
+
+```yaml
+inject:
+  filters:
+    - scope: class
+      include:
+        - 'cn\.demo\.service\..*'
+      exclude:
+        - 'cn\.demo\.service\.Safe\..*'
+    - scope: lib
+      libs:
+        - 'newclear-framework-.*\.jar'
+      include:
+        - 'com\.newclear\..*'
 ```
-1. 选入：未配置 inject.include.methods → 全部方法入选
-         已配置                        → 命中任一正则才入选
-2. 排除：命中 exclude.methods 任一正则 → 剔除
-3. 注册：剩余方法才注册 watch
+
+每个块对方法的判定顺序：作用范围不覆盖 → 该块不表态；`include` 非空且未命中 → 拦下；
+`exclude` 命中 → 拦下。**任一块把方法拦下即不注入**——不是取并集，也不是首个命中块生效。
+
+**块内字段不配置时**
+
+| 字段 | 不配置时 |
+|---|---|
+| `libs` | 覆盖全部 lib 单元，不限具体 jar |
+| `include` | 全选，该块覆盖范围内的方法全部通过 |
+| `exclude` | 不排除任何方法 |
+| 三者都不配置 | 该块**放行**其覆盖范围内的全部方法，不是"该块不注入"。若觉得不配置的意图不够显眼，可显式写 `include: ['.*']`——与不配置完全等价，只是更易读 |
+
+| scope | 作用范围 | 范围限定 |
+|---|---|---|
+| `global` | 全部已解析方法 | — |
+| `class` | `BOOT-INF/classes/` 的应用自身代码 | — |
+| `lib` | 第三方 jar | `libs`：jar 文件名正则全串匹配（与 `lib.whitelist` 同构） |
+
+由此：范围互斥的块（`class` 与 `lib`）互不表态、各自管各自；范围重叠的块（`global` 与 `class`）需逐块过关。
+
+> **注意**：没有块覆盖的方法等于"没人拦"，会被全部注入。因此只配置一个 `scope: lib` 块时，
+> 约束不到应用代码——应用代码仍会全量注入。要同时管住应用代码，需再配一个 `global` 或 `class` 块。
+
+- 方法正则对 `"完全限定类名.方法名"` 全串匹配：注入整类写 `- 'cn\.demo\.OrderService\..*'`，单个方法写 `- 'cn\.demo\.OrderService\.pay'`。
+- 注入时按块打印过滤概况：`filters: N block(s), applied in order -> [scope=class libs=0 include=1 exclude=1, ...]`；因过滤整类跳过的数量打印为 `skipped classes (no method kept): N`。
+- **过滤后若一个方法都没注册，判定为零覆盖，写表4 后 kill**（与"挂载了却无方法"同等对待）。
+- 配置非法即硬保护：`scope` 缺失或不在三类之内、任一正则非法，都写表4 后 kill。`scope` 不是 `lib` 时配的 `libs` 不参与范围判定（仅告警），但其正则仍会做合法性校验——写错同样硬保护，不会因为是冗余配置就放过。
+
+**完整示例**：只解析白名单命中的第三方 jar（不解析应用代码），注入范围仅限 test-lib 中 IdGenerator 类的方法：
+
+```yaml
+jdbc:
+  url: jdbc:mysql://127.0.0.1:3306/fault_sandbox?useSSL=false&serverTimezone=Asia/Shanghai
+  username: root
+  password: root123
+  driver: com.mysql.cj.jdbc.Driver
+
+sandbox:
+  home: /opt/sandbox
+
+parse:
+  classes:
+    enabled: false
+
+lib:
+  whitelist:
+    - 'test-lib-.*\.jar'
+
+inject:
+  filters:
+    - scope: lib
+      libs:
+        - 'test-lib-.*\.jar'
+      include:
+        - 'cn\.demo\.IdGenerator\..*'
 ```
 
-- 注入整类写 `- cn\.demo\.OrderService\..*`，单个方法写 `- cn\.demo\.OrderService\.pay`。
-- 注入时会打印过滤概况：`filter: include=N regex(es) ..., exclude=M regex(es) ..., driver=...`。
-- 因名单过滤而整类跳过的数量打印为 `skipped classes (no method kept): N`。
-- **过滤后若一个类都没注册，判定为零覆盖，写表4 后 kill**（与"挂载了却无方法"同等对待）。
+示例中未出现的配置项（`mount.enabled`、`parse.timeout.ms`、`inject.fault.times`、`inject.batch.size`、`log.dir`）均未配置，各自取默认值（见 5.2 / 5.3 表格）。
 
 ### 5.6 更换数据库
 
@@ -204,10 +293,10 @@ agent 启动时只校验表与列是否存在，**不会自动建表或加列**�
 
 | # | 改动点 | 位置 | 说明 |
 |---|---|---|---|
-| 1 | `jdbc.driver` | agent 与 module 的 `config.yml` | 目标库驱动类名。**两侧填的名字不同**：module 填标准类名（如 `org.postgresql.Driver`），agent 填 relocate 后的名字（若该驱动被 relocate） |
+| 1 | `jdbc.driver` | agent 与 module 的 `config.yml` | 目标库驱动类名。**两侧统一填驱动的标准类名**（如 `org.postgresql.Driver`）——agent 依赖在隔离 ClassLoader 内加载、类名保持原名 |
 | 2 | `jdbc.url` | agent 与 module 的 `config.yml` | 换成目标库连接串，如 `jdbc:postgresql://host:5432/fault_sandbox` |
 | 3 | 建表 DDL | `common/src/main/resources/schema.sql` | 4 张表按目标库方言改写（类型、自增主键、唯一索引） |
-| 4 | 驱动依赖 | `common/build.gradle` | 加入目标库驱动依赖；若该驱动会打进 agent fat jar，需在 `fault-agent/build.gradle` 增加对应 relocate 规则 |
+| 4 | 驱动依赖 | `common/build.gradle` | 加入目标库驱动依赖；依赖会随 core 打进 agent 嵌套 jar（`lib/agent-all.jar`），由隔离 ClassLoader 加载，无需其他动作 |
 
 MySQL → PostgreSQL 的类型映射（`schema.sql` 为 MySQL 方言）：
 
@@ -230,25 +319,26 @@ MySQL → PostgreSQL 的类型映射（`schema.sql` 为 MySQL 方言）：
 - **自增主键**：4 张表均依赖自增主键与 `getGeneratedKeys()`。
 - **单语句提交**：工具不使用任何数据库特定的 upsert 语法（`INSERT IGNORE` / `ON DUPLICATE KEY` 均未使用）。
 
-### 5.7 agent 侧 relocate 与驱动名的对应关系
+### 5.7 agent 隔离类加载（嵌套 jar）
 
-agent fat jar 内的第三方依赖会被 shadow 改写到自有包名（避免污染宿主应用，设计理由见 DESIGN「类加载与依赖隔离」）。因此：
+agent 的 fat jar 采用「壳 + 嵌套 core」结构，与应用依赖物理隔离，**依赖类名保持原名、不做改写**：
 
-> **一句话：agent 侧 `config.yml` 的 `jdbc.driver`，填 `fault-agent/build.gradle` 里 relocate 的目标包名 + 驱动类名——两处保持一致即可。**
+```
+fault-agent.jar（外壳）
+├── cn/chinaclear/fault/agent/FaultAgent.class          # 壳：premain 入口（AppClassLoader 加载）
+├── cn/chinaclear/fault/agent/AgentClassLoader.class    # 壳：隔离 ClassLoader
+├── lib/agent-all.jar                                   # 嵌套 core：业务类 + common + 全部依赖
+└── META-INF/MANIFEST.MF
+```
 
-| 文件 | 内容 | 说明 |
-|---|---|---|
-| `fault-agent/build.gradle` | `relocate 'com.mysql', 'cn.chinaclear.fault.shaded.mysql'` | 规则来源 |
-| agent 的 `config.yml` | `driver: cn.chinaclear.fault.shaded.mysql.cj.jdbc.Driver` | 按**目标包名**填 |
-| module 的 `config.yml` | `driver: com.mysql.cj.jdbc.Driver` | 模块未 relocate，填驱动**标准类名** |
+加载链路：JVM 调用 `FaultAgent.premain`（壳）→ 壳构造 `AgentClassLoader` 把嵌套 jar 全量读入内存 → 反射调用 core 入口 `AgentBootstrap.run`，此后全部逻辑运行在隔离 loader 内。隔离由两个机制共同保证：
 
-三条约束：
+1. **依赖收进嵌套 jar**：`lib/agent-all.jar` 在外壳里是一个 entry 而非解包目录，标准类加载器不递归进嵌套 jar，外壳根上又只有壳类——AppClassLoader 物理上看不到任何依赖类。
+2. **parent 取 system loader 的父加载器**（JDK9+ 的 platform loader / JDK8 的 ext loader）：委派链为嵌套 jar 自己 → platform/ext → bootstrap，三层都只有 JDK 模块类，应用的 classpath（挂在 App loader 上）被整体跳过。
 
-1. **目标包名不能用 `java.` / `javax.` / `sun.` / `jdk.` 开头**——JVM 禁止用户类加载器定义这些包。
-2. **不能覆盖 agent 自身的包**（`cn.chinaclear.fault.shaded` 以外的 `cn.chinaclear.fault.*`）——shadow 不改写 MANIFEST，`Premain-Class` 被改名会导致 agent 整体失效。
-3. **改动 relocate 规则后，同步改 agent 侧 `config.yml` 的 `jdbc.driver`**。
+带来的配置变化：`jdbc.driver` 在 agent 与 module 两侧**统一填驱动的标准类名**，不再需要区分"relocate 后的名字"。
 
-> 提示：relocate 改写的不仅是类名，jar 内**字符串常量**里的包名前缀也会一并改写；而 `config.yml` 是资源文件、不受影响。所以驱动名只能手工填对，不要试图用代码常量去推导（agent 侧该常量已被改写，推导恒不成立）。
+壳阶段失败（loader 初始化/反射调用失败）时 core 尚未跑起、无法写表4，降级为 `System.err` 留痕后立即 `halt(137)`，绝不放行"隔离未建立却继续启动"的进程。设计细节见 DESIGN「类加载与依赖隔离」，验证记录见 TEST_CASES「隔离类加载（A 系列）」。
 
 ---
 
@@ -283,7 +373,7 @@ premain 同步阻塞是刻意的：阻塞期间应用启动流程尚未开始，
 
 行执行到时，模块向表3 裸 INSERT 抢占（携带该行该线程该调用栈的第几次故障 `fault_seq`，以及调用栈原文与摘要）：成功 = 赢得该次故障执行权，**打印完整调用栈后** `kill -9`；唯一键冲突 = 该次故障已被他节点/进程触发，计数推进后放行继续执行（该分支不打印调用栈，避免热路径日志膨胀）。
 
-调用栈用于定位故障发生在哪条调用路径上：栈顶会裁掉取栈入口（`java.lang.Thread`）、sandbox 织入探针与事件分发帧、模块自身帧，只保留业务帧，帧格式为 `类名.方法名(文件名:行号)`，不做深度截断。判重键依赖调用栈摘要，摘要只能由取栈算出，因此 `beforeLine` 每次回调都会做一次完整栈遍历——行级回调是热路径，这会让目标应用明显变慢，是判重粒度细化到调用栈的既定代价；追求执行速度时用 `inject.include.methods` 缩小注入范围。
+调用栈用于定位故障发生在哪条调用路径上：栈顶会裁掉取栈入口（`java.lang.Thread`）、sandbox 织入探针与事件分发帧、模块自身帧，只保留业务帧，帧格式为 `类名.方法名(文件名:行号)`，不做深度截断。判重键依赖调用栈摘要，摘要只能由取栈算出，因此 `beforeLine` 每次回调都会做一次完整栈遍历——行级回调是热路径，这会让目标应用明显变慢，是判重粒度细化到调用栈的既定代价；追求执行速度时用 `inject.filters` 缩小注入范围。
 
 ### 6.4 临时副本清理（运维无感知）
 
@@ -299,46 +389,102 @@ agent 已内置清理守护（挂载完成后在 JVM 内同步快照副本清单
 
 > 注意：agent 的 `log.dir` 可由 `-javaagent` 参数指定到独立目录；**模块的 `log.dir` 来自模块自己的 `config.yml`**，相对路径基于目标进程工作目录。同一台机器上多个进程若共用工作目录，模块日志会写到同一个文件。
 
-### 7.1 正常链路（agent 日志）
+级别阈值由 `log.level` 控制（agent / module 各自配置，默认 `INFO`）：低于阈值的日志 stdout 与文件都不输出。
+INFO 是里程碑；**过程明细为 DEBUG**（大项目/多节点并发时数量与规模成正比，排查时临时调 DEBUG）；
+故障命中 `FAULT HIT & PREEMPTED` 是 INFO（kill 前最后一条，永远输出）；WARN / ERROR 出现即需要关注。
+
+### 7.1 agent 日志
+
+**INFO（里程碑）**
 
 | 日志 | 含义 |
 |---|---|
+| `log file: <路径> (level=...)` | 日志初始化完成（含生效级别） |
 | `premain start: pid=... parseTimeout=... mountTimeout=...` | agent 开始工作（两阶段超时各自独立计时） |
 | `bootJar located: /path/app.jar` | 成功定位 bootJar |
-| `jdbc driver resolved: <类名>` | 驱动加载成功（agent 侧为 relocate 后的类名） |
+| `jdbc driver resolved: <类名> -> loader=... codeSource=...` | 驱动加载成功（含类来源，用于排查驱动来自哪个 jar） |
 | `schema check OK: all 4 tables exist` | 建表校验通过 |
+| `parse units: count=N ids=[...]（classes=...）` | 本轮解析单元清单 |
 | `unit stored: type=CLASSES source=... unitId=N classes=A methods=B` | 该解析单元解析完成入库 |
-| `unit already completed, skip: ... unitId=N` | 该单元此前已解析，跳过 |
-| `mount cmd: [bash, ..., -d, fault-module/inject?id=...]` | 正在执行挂载命令 |
-| `sandbox.sh exit=0` | 挂载成功 |
 | `premain completed: mount OK, release application startup` | 应用开始启动（此刻起已处于保护中） |
+| `mount.enabled=false -> parse-only mode ...` | 纯解析模式放行（不挂载不注入） |
 
-### 7.2 命中与注入（module 日志）
+**DEBUG（过程明细）**
 
 | 日志 | 含义 |
 |---|---|
-| `filter: include=N regex(es) ..., exclude=M regex(es) ..., driver=...` | 注入时的过滤概况（`include=0` = 所有方法都是候选） |
-| `jdbc driver resolved: <类名>` | 驱动加载成功（module 侧为驱动标准类名） |
-| `skipped classes (no method kept): N` | 因名单过滤而整类跳过的类数 |
-| `batch registered: scanned=M rows, classes=C, injected=N methods, cursor=类名#方法名` | **每批**注入情况：`M` 本批扫过的 `t_class_method` 行数、`C` 本批注册的类数（Class 级）、`N` 本批实际注入的方法数（方法级，一个方法名覆盖其全部重载）、`cursor` 本批断点（各批游标严格递增即说明无重复注册） |
-| `inject done: injected=N methods, scanned=S rows, tag=...` | 注入完成：`N` **注入故障总数**（方法名数）、`S` 累计扫过的行数。`S > N` 说明存在同名重载行被去重（同一方法名只注入一次） |
-| `FAULT HIT & PREEMPTED: tag=... unitId=... class=... method=... line=... seq=k/N thread=... stackHash=... machine=...` 换行接 `call stack (N frames):` 与逐帧调用栈 | **故障命中**：该行该线程该调用栈本轮第 k 次故障（上限 N），调用栈已打印并随记录入库，进程即将被 kill |
-| `fault seq already preempted in this round (tag=...), release execution: class#method#line#thread#stackHash seq=k` | 该行该线程该调用栈本轮的第 k 次故障已被他节点/进程触发，本节点放行 |
-| `inject skipped: units already injected` | 重复执行挂载命令被忽略 |
+| `unit already completed, skip: ... unitId=N` | 该单元此前已解析，跳过 |
+| `mount cmd: [bash, ..., -d, fault-module/inject?id=...]` | 正在执行挂载命令（完整命令行） |
+| `sandbox.sh exit=N output: <全文>` | sandbox.sh 退出码与完整输出（挂载排障用） |
 
-### 7.3 异常与告警（出现即代表按策略 kill）
+**WARN**
+
+| 日志 | 含义 |
+|---|---|
+| `read sun.java.command failed` / `read /proc/self/cmdline failed` / `read jvm input arguments failed` | bootJar 定位的降级探测路径某一步失败（会继续尝试下一步） |
+| `bootJar path not exists: ...` | 探测到的路径不存在（继续尝试其他方式） |
+| `bootJar not located: application must be started with -jar` | 所有方式都未定位到（随后硬保护） |
+| `log dir not writable (...), fallback to stdout only` | 日志目录不可写，仅剩 stdout |
+
+**ERROR（出现即按策略 kill 或记录表4）**
+
+| 日志 | 含义 | 处理 |
+|---|---|---|
+| `HARD PROTECT: phase=...`（PARSE / DB / MOUNT 各形态，见 7.3） | 硬保护：写表4（尽力）后 kill 当前进程 | 见 7.3 对应行 |
+| `config unavailable (missing/invalid), skip DB records (local log only)` | 配置不可用，表4 写不了，仅本地留痕 | 修正 `config.yml` |
+| `write t_error_record failed, fallback to local log only` | 表4 写失败（库不可达），退化为本地日志 | 恢复数据库后重启 |
+| `tmp reaper spawn failed (best effort, cleanup hygiene only)` | 临时副本托管进程启动失败（仅影响清理卫生，不影响注入） | 忽略或检查系统环境 |
+
+### 7.2 module 日志
+
+**INFO（里程碑）**
+
+| 日志 | 含义 |
+|---|---|
+| `bootJar resolved: <路径> (hash=...)` | 挂载命令参数定位 bootJar 成功 |
+| `inject skipped: units already injected` | 重复执行挂载命令被忽略（本 tag 已注入过） |
+| `skipped classes (no method kept): N` | 因名单过滤而整类跳过的类数汇总 |
+| `inject done: injected=N methods, scanned=S rows, tag=...` | 注入完成：`N` **注入故障总数**（方法名数）、`S` 累计扫过的行数。`S > N` 说明存在同名重载行被去重（同一方法名只注入一次） |
+| `FAULT HIT & PREEMPTED: tag=... unitId=... class=... method=... line=... seq=k/N thread=... stackHash=... machine=...` 换行接 `call stack (N frames):` 与逐帧调用栈 | **故障命中（kill 前最后一条）**：该行该线程该调用栈本轮第 k 次故障（上限 N），调用栈已打印并随记录入库，进程即将被 kill。多节点并发时仅赢得抢占的节点打印 |
+
+**DEBUG（过程明细）**
+
+| 日志 | 含义 |
+|---|---|
+| `inject requested, unitIds=... tag=... batchSize=...` | 收到挂载命令，开始注入流程 |
+| `filters: N block(s), applied in order -> [scope=... libs=N include=N exclude=N, ...]` | 过滤块概况（`N block(s)` = 0 表示无过滤块，所有方法都是候选） |
+| `unit: id=... type=... source=...` | 本轮生效的解析单元明细 |
+| `batch registered: scanned=M rows, classes=C, injected=N methods, cursor=类名#方法名` | **每批**注入情况：`M` 本批扫过的 `t_class_method` 行数、`C` 本批注册的类数（Class 级）、`N` 本批实际注入的方法数（方法级，一个方法名覆盖其全部重载）、`cursor` 本批断点（各批游标严格递增即说明无重复注册） |
+| `no method kept after include/exclude filtering, skip class: ...` | 该类的方法全部被名单过滤掉，整类跳过（**每个类一条**，大项目较多） |
+| `fault seq already preempted in this round (tag=...), release execution: class#method#line#thread#stackHash seq=k` | 该行该线程该调用栈本轮的第 k 次故障已被他节点/进程触发，本节点放行（**多节点并发时与冲突次数成正比**） |
+
+**WARN / ERROR（出现即需要关注）**
+
+| 级别 | 日志 | 含义 | 处理 |
+|---|---|---|---|
+| ERROR | `jvm property 'fault.tag' missing -> kill process per policy` | 启动时没加 `-Dfault.tag` | 启动命令补上 `-Dfault.tag=<轮次>` |
+| ERROR | `no methods found for unitIds=... -> kill per policy` | 解析结果里一个方法都没有 | 检查解析是否完成（表2 是否有数据） |
+| ERROR | `no class registered after include/exclude filtering ...` | 名单与解析结果无交集，零覆盖 | 检查 `inject.filters` 各块的 scope 与正则 |
+| ERROR | `register watch failed for class=...` | 该类 watch 注册失败（写表4 后按策略 kill） | 看异常栈定位 |
+| ERROR | `inject failed, kill process per policy` | 注入流程异常 | 看异常栈定位 |
+| ERROR | `beforeLine handling failed, kill process per policy` | 行级回调异常（含 DB 不可用），按硬保护 kill | 看异常栈；检查数据库 |
+| ERROR | `kill not effective, rollback fault record and release: ...` | kill 手段未生效，回滚故障记录并放行 | 检查进程环境（罕见） |
+| WARN / ERROR | `write t_error_record failed (local log only)` | 表4 写失败（库不可达），仅本地留痕 | 恢复数据库 |
+| WARN | `decode bootJar param failed: ...` | 挂载命令参数解码失败 | 检查挂载命令与 agent 版本是否配套 |
+| WARN / ERROR | `jdbc driver resolved: <类名> -> loader=... codeSource=...`（module 侧同 agent） | 驱动加载成功（标准类名） | — |
+
+### 7.3 硬保护速查（agent 侧 HARD PROTECT 各形态）
 
 | 日志 | 含义 | 处理 |
 |---|---|---|
 | `HARD PROTECT: phase=PARSE, type=EXCEPTION, msg=bootJar not located` | 未以 `-jar` 方式启动 | 改为 `java -javaagent:... -jar app.jar` 启动 |
+| `HARD PROTECT: phase=PARSE, ... 该开关与白名单不可同时为空` | `parse.classes.enabled=false` 且白名单没匹配到 jar，零解析单元 | 打开 classes 解析或修白名单 |
 | `HARD PROTECT: phase=DB, msg=schema check failed ...` | 库表未建/不可达 | 先执行 `schema.sql`；检查 `jdbc.*` 与网络 |
 | `HARD PROTECT: phase=DB, ... Communications link failure` | 数据库连不上 | 检查数据库存活、`jdbc.url`、防火墙 |
+| `HARD PROTECT: phase=PARSE, ... invalid config.yml / required config missing` | 配置非法 / 必填项缺失（含 `log.level` 非法、正则非法、留空） | 修正 `config.yml` 后重启（痕迹在 stdout/app.log，因配置不可用写不了 `logs/`） |
 | `HARD PROTECT: phase=MOUNT, type=TIMEOUT, msg=mount wait timeout（含 flock 串行化锁等待）` | 挂载超时（含等不到 attach 串行锁） | 检查 sandbox 安装与 `sandbox.home`；同机进程多时锁等待会拉长，适当调大 `mount.timeout.ms` |
-| `HARD PROTECT: phase=MOUNT, ... mount failed（flock -w Ns 等待串行化锁超时/脚本非 0 退出）exit code=1` | 挂载命令失败 | 看 `mount cmd` 下方的输出内容定位（权限/模块 jar 缺失/flock 缺失等） |
-| `jvm property 'fault.tag' missing -> kill process per policy` | 启动时没加 `-Dfault.tag` | 启动命令补上 `-Dfault.tag=<轮次>` |
-| `no class registered after include/exclude filtering ...` | 名单与解析结果无交集，零覆盖 | 检查 `inject.include.methods` / `exclude.methods` |
-| `write t_error_record failed, fallback to local log only` | 故障库不可达，错误只落在本地日志 | 恢复数据库后重启 |
-| `HARD PROTECT: ... invalid config.yml` / `required config missing` | 配置非法 / 必填项缺失（痕迹在 stdout/app.log，因配置不可用写不了 `logs/`） | 修正 `config.yml` 后重启 |
+| `HARD PROTECT: phase=MOUNT, ... mount failed（flock -w Ns 等待串行化锁超时/脚本非 0 退出）exit code=1` | 挂载命令失败 | 开 `log.level=DEBUG` 看 `mount cmd` 下方的输出内容定位（权限/模块 jar 缺失/flock 缺失等） |
+| `[fault-agent] HARD PROTECT: agent bootstrap failed: ...`（stdout） | 壳阶段失败：隔离 ClassLoader 初始化/反射调用失败，core 未跑起 | 检查 agent jar 完整性（是否被截断/改坏） |
 
 ---
 
@@ -422,6 +568,8 @@ agent 已内置清理守护（挂载完成后在 JVM 内同步快照副本清单
 | 边界 | 原因 |
 |---|---|
 | `<clinit>`（静态初始化）不注入 | sandbox 在**类结构收集阶段**即硬编码排除（`ClassStructureImplByAsm$5$1.visitMethod`，无配置开关）；解析器同步排除，收录只会让表2 多出永不命中的行 |
+| abstract 方法不注入 | 接口声明的抽象方法与抽象类的 abstract 方法没有 Code 属性，桩无处可插，注册后永不回调；解析阶段即排除 |
+| native 方法不注入 | sandbox 虽会去掉 native 并生成代理方法完成织入，但只插 BEFORE/RETURN/THROWS、**不插 LINE**（native 无 Code 属性也就没有行号表），本模块只监听 `beforeLine`，故同样永不回调；解析阶段即排除 |
 | bridge / `access$xxx` synthetic 方法不注入 | 转发型 synthetic 方法体 1-2 行且行号指向原方法声明处，hook 会与目标方法重复命中；仅保留 `lambda$` 前缀 |
 | lambda（`lambda$xxx`）**会注入** | lambda 体内是用户逻辑；lambda 体被 javac 抽为原类的私有合成方法，有字节码有 LNT |
 | `$$Lambda$` 运行时壳类不注入 | JVM 现场生成的转发壳，无 LNT、名字带随机序号、无业务逻辑 |
@@ -456,13 +604,13 @@ agent 已内置清理守护（挂载完成后在 JVM 内同步快照副本清单
 不会。同一行同一轮最多死一个节点（数据库唯一索引保证），各节点死于不同行时会各死一次。
 
 **Q5：为什么 agent 和 module 的 `jdbc.driver` 填的不一样？**
-agent fat jar 内的第三方依赖被 shadow relocate，jar 中不存在原包名的驱动类；module 未做 relocate。详见 [5.7](#57-agent-侧-relocate-与驱动名的对应关系)。
+agent 依赖收进嵌套 core jar 由隔离 ClassLoader 加载，类名保持原名；module 运行在 sandbox 独立 classloader。两侧 `jdbc.driver` 统一填驱动的标准类名，详见 [5.7](#57-agent-隔离类加载嵌套-jar)。
 
 **Q6：一行到底会发生多少次故障？**
 `inject.fault.times` 是**每行每线程每调用栈**的上限。同一行被 T 个线程、S 种调用栈执行时，本轮最多 T × S × N 次故障；每个「行+线程+调用栈+第几次」组合在集群内只死一个节点。表3 中同一行会有多条记录，靠 `stack_hash` 区分调用路径、靠 `fault_seq` 区分第几次。
 
 **Q7：加了调用栈判重后应用明显变慢，正常吗？**
-正常，且是既定代价。判重键含调用栈摘要，摘要只能由取栈算出，因此每次行回调都要做一次完整栈遍历。用 `inject.include.methods` 缩小注入范围可直接降低这部分开销；若某行存在递归，同一行在不同递归深度会产生不同摘要、故障机会数随深度增长，可用 `exclude.methods` 把递归方法排除。
+正常，且是既定代价。判重键含调用栈摘要，摘要只能由取栈算出，因此每次行回调都要做一次完整栈遍历。用 `inject.filters` 缩小注入范围可直接降低这部分开销；若某行存在递归，同一行在不同递归深度会产生不同摘要、故障机会数随深度增长，可在 `inject.filters` 的块内用 `exclude` 把递归方法排除。
 
 **Q8：想临时不让 agent 干活？**
 把 `mount.enabled` 设为 `false` 可只解析不注入；从启动命令去掉 `-javaagent` 参数重启则完全不介入（不要用其它方式绕过，无 tag 时进程会被 kill）。

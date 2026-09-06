@@ -115,7 +115,8 @@ final class KillAdviceListener extends AdviceListener {
             if (won) {
                 // kill 之前打印触发本次故障的调用栈，便于定位故障发生在哪条调用路径上。
                 // 仅在本节点赢得抢占时打印：冲突放行分支会被反复执行，打印会造成日志膨胀。
-                FaultLogger.error("FAULT HIT & PREEMPTED: tag=" + tag
+                // 故障命中是演练的预期事件而非错误，级别为 INFO（但它是 kill 前最后一条，永远输出）。
+                FaultLogger.info("FAULT HIT & PREEMPTED: tag=" + tag
                         + " unitId=" + unitId
                         + " class=" + className
                         + " method=" + method
@@ -140,8 +141,9 @@ final class KillAdviceListener extends AdviceListener {
                 // kill 生效：进程终止，本方法不会正常返回
             } else {
                 // DuplicateKey：该行该线程本轮的第 seq 次故障已被其他节点/进程触发。
-                // 计数已在 nextSeq 中推进，放行继续执行（不再反复撞库）
-                FaultLogger.info("fault seq already preempted in this round (tag=" + tag
+                // 计数已在 nextSeq 中推进，放行继续执行（不再反复撞库）。
+                // 多节点并发时该分支与冲突次数成正比，属过程明细，降为 DEBUG（log.level=INFO 下静默）
+                FaultLogger.debug("fault seq already preempted in this round (tag=" + tag
                         + "), release execution: " + hitKey + " seq=" + seq);
             }
         } catch (Throwable t) {

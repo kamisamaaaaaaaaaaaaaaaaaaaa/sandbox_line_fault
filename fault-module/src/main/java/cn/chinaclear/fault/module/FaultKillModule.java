@@ -8,8 +8,11 @@ import cn.chinaclear.fault.common.MachineInfo;
 import cn.chinaclear.fault.common.dao.ClassMethodDao;
 import cn.chinaclear.fault.common.dao.ErrorRecordDao;
 import cn.chinaclear.fault.common.dao.FaultRecordDao;
+import cn.chinaclear.fault.common.dao.JarRecordDao;
 import cn.chinaclear.fault.common.model.ClassMethodInfo;
 import cn.chinaclear.fault.common.model.ErrorRecord;
+import cn.chinaclear.fault.common.model.InjectFilter;
+import cn.chinaclear.fault.common.model.JarRecord;
 import com.alibaba.jvm.sandbox.api.Information;
 import com.alibaba.jvm.sandbox.api.Module;
 import com.alibaba.jvm.sandbox.api.annotation.Command;
@@ -46,8 +49,8 @@ public class FaultKillModule implements Module {
     @Command("inject")
     public void inject(final Map<String, String> param) {
         FaultConfig config = FaultConfig.load(null);
-        // module 日志目录独立配置（见本模块 config.yml 的 log.dir）
-        FaultLogger.init(config.logDir(), "fault-module.log");
+        // module 日志目录独立配置（见本模块 config.yml 的 log.dir / log.level）
+        FaultLogger.init(config.logDir(), "fault-module.log", config.logLevel());
         final long pid = currentPid();
         List<Long> unitIds = null;
         try {
@@ -72,17 +75,30 @@ public class FaultKillModule implements Module {
             }
             FaultLogger.info("inject requested, unitIds=" + unitIds + ", tag=" + tag
                     + ", batchSize=" + config.injectBatchSize());
-            int includeCount = config.includeMethods().size();
-            FaultLogger.info("filter: include=" + includeCount + " regex(es)"
-                    + (includeCount == 0 ? " (all methods are candidates)" : " (only matched methods are injected)")
-                    + ", exclude=" + config.excludeMethods().size() + " regex(es)"
-                    + ", driver=" + config.jdbcDriver());
+            // 过滤块：配置非法（scope 非法 / 正则非法）在构造时抛出，由本方法外层 catch 落表4 后 kill
+            final List<InjectFilter> filters = config.injectFilters();
+            FaultLogger.info("filters: " + (filters.isEmpty()
+                    ? "none (all parsed methods are injection candidates)"
+                    : filters.size() + " block(s), applied in order -> " + filters));
 
             JdbcHelper db = new JdbcHelper(config.jdbcUrl(), config.jdbcUsername(), config.jdbcPassword(),
                     config.jdbcDriver());
             ClassMethodDao methodDao = new ClassMethodDao(db);
             FaultRecordDao faultRecordDao = new FaultRecordDao(db);
             ErrorRecordDao errorRecordDao = new ErrorRecordDao(db);
+
+            // 单元元信息（unit_type + source_jar）：表2 只带 unit_id，方法属于应用代码
+            // 还是哪个第三方 jar 需回到表1 才能确定，用于过滤块的作用范围判定。
+            // 一次性查完（单元数为个位数），不随方法批次增长。
+            Map<Long, JarRecord> unitMeta = new JarRecordDao(db).findByIds(unitIds);
+            if (unitMeta.size() != unitIds.size()) {
+                throw new IllegalStateException("unit meta missing: expected=" + unitIds.size()
+                        + " found=" + unitMeta.size() + ", unitIds=" + unitIds);
+            }
+            for (JarRecord u : unitMeta.values()) {
+                FaultLogger.info("unit: id=" + u.getId() + " type=" + u.getUnitType()
+                        + " source=" + u.getSourceJar());
+            }
 
             // 游标分批读取：每批注册后即可被回收，避免大项目全量方法一次性读入内存。
             // 游标为 (类名, 方法名, 主键) 三元组，使同一 (类名, 方法名) 的重载行连续分布，
@@ -120,8 +136,8 @@ public class FaultKillModule implements Module {
                                 bootJar, bootJarHash, config.faultTimes());
                 // 每批独立的结果对象：仅两个计数器，不持有类名等集合（类数多时避免常驻内存）
                 RegisterStat batchStat = new RegisterStat();
-                registerBatch(classMethods, listener, errorRecordDao, unitIds,
-                        config.includeMethods(), config.excludeMethods(), batchStat);
+                registerBatch(classMethods, classToUnitId, listener, errorRecordDao, unitIds,
+                        filters, unitMeta, batchStat);
                 injectedMethods += batchStat.methods;
                 FaultLogger.info("batch registered: scanned=" + batch.size()
                         + " rows, classes=" + batchStat.classes
@@ -145,7 +161,7 @@ public class FaultKillModule implements Module {
                         + " -> kill per policy");
                 recordInjectError(errorRecordDao,
                         "no class registered after include/exclude filtering, unitIds=" + unitIds
-                                + " (check inject.include.methods / exclude.methods)", null, unitIds);
+                                + " (check inject.filters)", null, unitIds);
                 KillUtil.killCurrentProcess(pid);
                 return;
             }
@@ -179,29 +195,28 @@ public class FaultKillModule implements Module {
 
     /**
      * 注册一批类的 watch（每个类一次链式注册，方法逐个 onBehavior 链上）。
-     * 过滤顺序：先按 inject.include.methods 选入（名单为空则全部入选），再按 exclude.methods 排除；
-     * 只有既在名单内、又未被排除的方法会被注入。
+     *
+     * 过滤按配置顺序串行作用：作用范围不覆盖该类所属单元的块不表态；范围覆盖的块内
+     * 先 include 选入（空 = 全选）再 exclude 过滤，任一块把方法拦下即不注入。
      * 结果累加进 stat（类级 watch 数、方法级注入点数）。
      */
-    private void registerBatch(Map<String, List<String>> classMethods, KillAdviceListener listener,
+    private void registerBatch(Map<String, List<String>> classMethods,
+                             Map<String, Long> classToUnitId, KillAdviceListener listener,
                              ErrorRecordDao errorRecordDao, List<Long> unitIds,
-                             List<String> includeMethodRegex, List<String> excludeMethodRegex,
+                             List<InjectFilter> filters, Map<Long, JarRecord> unitMeta,
                              RegisterStat stat) {
-        java.util.regex.Pattern[] includeMethod = compilePatterns(includeMethodRegex);
-        java.util.regex.Pattern[] excludeMethod = compilePatterns(excludeMethodRegex);
         int skipped = 0;
         for (Map.Entry<String, List<String>> entry : classMethods.entrySet()) {
             String className = entry.getKey();
+            JarRecord unit = unitMeta.get(classToUnitId.get(className));
+            if (unit == null) {
+                throw new IllegalStateException("unit meta not found for class=" + className);
+            }
             List<String> kept = new ArrayList<>();
             for (String name : entry.getValue()) {
-                String qualifiedName = className + "." + name;
-                if (includeMethod.length > 0 && !matchesAny(includeMethod, qualifiedName)) {
-                    continue;    // 配置了名单但未命中：不注入
+                if (passesFilters(filters, unit, className + "." + name)) {
+                    kept.add(name);
                 }
-                if (matchesAny(excludeMethod, qualifiedName)) {
-                    continue;    // 命中排除：不注入
-                }
-                kept.add(name);
             }
             if (kept.isEmpty()) {
                 FaultLogger.info("no method kept after include/exclude filtering, skip class: " + className);
@@ -236,25 +251,22 @@ public class FaultKillModule implements Module {
         }
     }
 
-    private static java.util.regex.Pattern[] compilePatterns(List<String> regexes) {
-        List<java.util.regex.Pattern> out = new ArrayList<>();
-        for (String r : regexes) {
-            try {
-                out.add(java.util.regex.Pattern.compile(r));
-            } catch (Throwable t) {
-                FaultLogger.warn("invalid regex \"" + r + "\", skipped: " + t.getMessage());
+    /**
+     * 串行过滤：按配置顺序逐块判定。
+     * 作用范围不覆盖该方法所属单元的块不表态；范围覆盖的块内，include 未命中或 exclude 命中即被拦下。
+     * 于是范围互斥的块（class 与 lib）各自管各自，范围重叠的块（global 与 class）则需逐块过关。
+     */
+    private static boolean passesFilters(List<InjectFilter> filters, JarRecord unit,
+                                         String qualifiedName) {
+        for (InjectFilter f : filters) {
+            if (!f.covers(unit.getUnitType(), unit.getSourceJar())) {
+                continue;
+            }
+            if (!f.passes(qualifiedName)) {
+                return false;
             }
         }
-        return out.toArray(new java.util.regex.Pattern[0]);
-    }
-
-    private static boolean matchesAny(java.util.regex.Pattern[] patterns, String value) {
-        for (java.util.regex.Pattern p : patterns) {
-            if (p.matcher(value).matches()) {
-                return true;
-            }
-        }
-        return false;
+        return true;
     }
 
     /** 表4 留痕：写失败仅告警（DB 可能正是不可用的一方） */

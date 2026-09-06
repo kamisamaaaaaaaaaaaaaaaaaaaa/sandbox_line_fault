@@ -45,9 +45,9 @@ public final class JdbcHelper {
      * agent 与 module 各自持有独立的 common 类与静态状态（sandbox 模块类加载器为子优先加载），
      * `Class.forName` 用的是本类的定义类加载器，因此两侧各自解析、互不干扰。
      *
-     * 注意：agent fat jar 内的第三方依赖被 relocate（见 fault-agent/build.gradle），jar 中**不存在**
-     * 原包名的驱动类，故 agent 侧 config.yml 的 jdbc.driver 必须填 relocate 后的类名；module 未做
-     * relocate，填驱动的标准类名即可。详见 README 的"更换数据库"一节。
+     * 注意：agent 依赖由隔离 ClassLoader（嵌套 jar，见 fault-agent/build.gradle）加载，类名保持
+     * 原名不 relocate，agent 与 module 两侧 jdbc.driver 统一填驱动的标准类名。
+     * 详见 README 的"更换数据库"一节。
      */
     private Driver resolveDriver() {
         if (driverClassName == null || driverClassName.trim().isEmpty()) {
@@ -66,11 +66,14 @@ public final class JdbcHelper {
                 Driver d = (Driver) Class.forName(driverClassName).getDeclaredConstructor().newInstance();
                 driver = d;
                 driverResolvedFor = driverClassName;
-                FaultLogger.info("jdbc driver resolved: " + driverClassName);
+                // 类来源（loader + codeSource）一并打印：排查"驱动来自哪个 jar"时可直接看日志
+                FaultLogger.info("jdbc driver resolved: " + driverClassName
+                        + " -> loader=" + d.getClass().getClassLoader()
+                        + ", codeSource=" + d.getClass().getProtectionDomain().getCodeSource());
                 return d;
             } catch (Throwable t) {
                 throw new IllegalStateException("jdbc driver load failed: " + driverClassName
-                        + " -> " + t + "（运行在 agent fat jar 内时，依赖已被 relocate，jdbc.driver 需填 relocate 后的类名）", t);
+                        + " -> " + t + "（jdbc.driver 填驱动的标准类名，agent/module 一致）", t);
             }
         }
     }

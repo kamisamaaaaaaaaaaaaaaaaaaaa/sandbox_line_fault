@@ -1,5 +1,6 @@
 package cn.chinaclear.fault.common;
 
+import cn.chinaclear.fault.common.model.InjectFilter;
 import org.yaml.snakeyaml.Yaml;
 
 import java.io.IOException;
@@ -10,8 +11,9 @@ import java.util.Map;
 import java.util.Properties;
 
 /**
- * 配置加载：classpath 下 config.yml（YAML，支持嵌套分组）为基线，展平为点分键，
- * agentArgs 键值对覆盖（仅 agent 侧使用，形如 -javaagent:fault-agent.jar=k1=v1,k2=v2）。
+ * 配置加载：classpath 下的 config.yml（YAML，支持嵌套分组）是配置的唯一来源，展平为点分键。
+ * -javaagent 的 agentArgs 覆盖写法已不再支持：传入什么都不会生效（见 load）。
+ * 「写了键却没值」（冒号后无值、空字符串、列表项留空、空块）一律判定配置非法（见 flatten/get/getList）。
  */
 public final class FaultConfig {
 
@@ -23,6 +25,9 @@ public final class FaultConfig {
     }
 
     public static FaultConfig load(String agentArgs) {
+        // agentArgs（-javaagent:fault-agent.jar=k=v）已不再支持：传入什么都不会生效——
+        // 不解析、不覆盖、也不报错，配置的唯一来源是 classpath 下的 config.yml。
+        // 该形参是 JVM -javaagent 规范要求的，签名不可省略。
         FaultConfig c = new FaultConfig();
         try (InputStream in = FaultConfig.class.getClassLoader().getResourceAsStream(RESOURCE_NAME)) {
             if (in != null) {
@@ -43,27 +48,6 @@ public final class FaultConfig {
             // YAML 语法错误等（如双引号内写单个 \.）：配置非法，同样硬保护
             throw new IllegalStateException("invalid " + RESOURCE_NAME + ": " + e.getMessage(), e);
         }
-        if (agentArgs != null && !agentArgs.trim().isEmpty()) {
-            for (String pair : agentArgs.split(",")) {
-                pair = pair.trim();
-                int i = pair.indexOf('=');
-                if (i > 0) {
-                    String k = pair.substring(0, i).trim();
-                    String value = pair.substring(i + 1).trim();
-                    // 列表键覆盖：清除原条目（key.0/key.1/...）后把覆盖值写入首条目，保证整体替换语义
-                    boolean wasList = false;
-                    for (int j = 0; c.props.containsKey(k + "." + j); j++) {
-                        c.props.remove(k + "." + j);
-                        wasList = true;
-                    }
-                    if (wasList) {
-                        c.props.setProperty(k + ".0", value);
-                    } else {
-                        c.props.setProperty(k, value);
-                    }
-                }
-            }
-        }
         return c;
     }
 
@@ -73,25 +57,47 @@ public final class FaultConfig {
         for (Map.Entry<String, Object> e : src.entrySet()) {
             String key = prefix.isEmpty() ? e.getKey() : prefix + "." + e.getKey();
             Object value = e.getValue();
+            if (value == null) {
+                // 冒号后无值（YAML 解析为 null）：写了键却没值，判定配置非法。
+                // 必须在这里拦——若静默跳过，它与「整行不写」在 Properties 里无法区分，
+                // 读取阶段就只能取默认值，写了键的意图被静默吞掉。
+                throw new IllegalStateException("config \"" + key + "\" is present but has no value"
+                        + "（要么填值，要么删除该行）");
+            }
             if (value instanceof Map) {
                 flatten(key, (Map<String, Object>) value, out);
             } else if (value instanceof List) {
                 List<Object> list = (List<Object>) value;
                 for (int i = 0; i < list.size(); i++) {
                     Object item = list.get(i);
-                    if (item != null) {
+                    if (item == null) {
+                        // "- " 后无内容：列表项留空，判定配置非法
+                        throw new IllegalStateException("config \"" + key + "\" item " + i
+                                + " is empty（要么填值，要么删除该行）");
+                    }
+                    if (item instanceof Map) {
+                        if (((Map<String, Object>) item).isEmpty()) {
+                            // "- {}"：写了块但块内无任何字段，判定配置非法
+                            throw new IllegalStateException("config \"" + key + "\" item " + i
+                                    + " is an empty block（要么填字段，要么删除该块）");
+                        }
+                        // 列表元素本身是 Map（如 inject.filters 下的每个过滤块）：必须递归展平，
+                        // 否则整块会被 String.valueOf 压成一个字符串，块内字段全部读不到
+                        flatten(key + "." + i, (Map<String, Object>) item, out);
+                    } else {
                         out.setProperty(key + "." + i, String.valueOf(item));
                     }
                 }
-            } else if (value != null) {
+            } else {
                 out.setProperty(key, String.valueOf(value));
             }
         }
     }
 
     /**
-     * 列表配置：只支持 YAML 列表形式（key.0、key.1...，对应 yml 里一行一个 "- " 条目）；
-     * 未配置该参数 = 空列表（不解析任何 lib / 不排除任何方法）。
+     * 列表配置：YAML 列表形式（key.0、key.1...，对应 yml 里一行一个 "- " 条目）。
+     * key.N 不存在 = 该键未配置，返回空集合（合法语义，如不解析任何 lib）；
+     * key.N 存在但为空串/纯空白 = 列表项留空，判定配置非法（此前是静默跳过，名单部分失效却无人知晓）。
      */
     public List<String> getList(String key) {
         List<String> out = new ArrayList<>();
@@ -101,17 +107,30 @@ public final class FaultConfig {
             if (v == null) {
                 break;
             }
-            if (!v.trim().isEmpty()) {
-                out.add(v.trim());
+            if (v.trim().isEmpty()) {
+                throw new IllegalStateException("config \"" + key + "\" item " + i
+                        + " is present but empty（要么填值，要么删除该行）");
             }
+            out.add(v.trim());
             i++;
         }
         return out;
     }
 
+    /**
+     * 标量读取：键不存在 = 未配置（合法，返回默认值）；
+     * 键存在但值为空串/纯空白 = 留空，判定配置非法（抛异常）。
+     */
     public String get(String key, String def) {
         String v = props.getProperty(key);
-        return v == null || v.trim().isEmpty() ? def : v.trim();
+        if (v == null) {
+            return def;
+        }
+        if (v.trim().isEmpty()) {
+            throw new IllegalStateException("config \"" + key + "\" is present but empty"
+                    + "（要么填值，要么删除该行）");
+        }
+        return v.trim();
     }
 
     public boolean getBoolean(String key, boolean def) {
@@ -155,6 +174,19 @@ public final class FaultConfig {
         return require("jdbc.driver");
     }
 
+    /**
+     * 日志级别阈值：DEBUG / INFO / WARN / ERROR（忽略大小写，返回归一化大写），默认 INFO。
+     * 低于阈值的日志（stdout 与文件）都不输出；非法值按配置非法硬保护（与正则非法同一约定）。
+     */
+    public String logLevel() {
+        String v = get("log.level", "INFO").toUpperCase();
+        if (!v.equals("DEBUG") && !v.equals("INFO") && !v.equals("WARN") && !v.equals("ERROR")) {
+            throw new IllegalStateException("invalid log.level: \"" + v
+                    + "\"（允许值：DEBUG / INFO / WARN / ERROR）");
+        }
+        return v;
+    }
+
     /** BOOT-INF/lib 白名单：正则表达式（对 jar 文件名全串匹配），YAML 列表一行一个（兼容逗号分隔） */
     public List<String> libWhitelist() {
         return getList("lib.whitelist");
@@ -186,20 +218,43 @@ public final class FaultConfig {
     }
 
     /**
-     * 注入名单：方法正则，对 "完全限定类名.方法名" 全串匹配，YAML 列表一行一个（兼容逗号分隔）。
-     * 未配置 = 所有已解析方法都是注入候选；配置 = 只有命中的方法进入候选（再经 exclude.methods 排除）。
-     * 注入某个类的所有方法写 "全限定类名\..*"，例如 cn\.demo\.OrderService\..*
+     * 是否解析 BOOT-INF/classes（应用自身代码），默认 true。
+     * false = 只解析 lib.whitelist 命中的第三方 jar，应用代码既不解析也不注入故障
+     * （对应「只对第三方组件做故障演练」的场景）。
+     * 若此时白名单也未匹配到任何 jar，本轮解析单元为空 → 硬保护 PARSE。
      */
-    public List<String> includeMethods() {
-        return getList("inject.include.methods");
+    public boolean parseClassesEnabled() {
+        return getBoolean("parse.classes.enabled", true);
     }
 
     /**
-     * 注入排除：方法正则，对 "完全限定类名.方法名" 全串匹配，YAML 列表一行一个（兼容逗号分隔），命中的方法不注入。
-     * 排除某个类的所有方法写 "全限定类名\..*"，例如 cn\.demo\.OrderService\..*
+     * 注入过滤块：按配置顺序串行作用。每个块带一个作用范围（global / class / lib），
+     * 范围覆盖的方法才由该块处理，块内先 include 选入（空 = 全选）再 exclude 过滤，
+     * 任一块把方法拦下即不注入。未配置 = 全部注入（等价于空 global 块）。
+     *
+     * 键形态：inject.filters.N.scope / .libs / .include / .exclude（三处名单均为直接列表）。
+     * 配置非法（scope 缺失或非三类之一、正则非法）立即抛异常，由调用方上层转硬保护。
      */
-    public List<String> excludeMethods() {
-        return getList("exclude.methods");
+    public List<InjectFilter> injectFilters() {
+        List<InjectFilter> out = new ArrayList<>();
+        if (get("inject.filters", null) != null) {
+            // filters 被配成了标量而非块列表：按块列表去读会全部落空、静默当成"未配置"，
+            // 名单失效却无人知晓，因此直接判定配置非法
+            throw new IllegalStateException("inject.filters must be a YAML list of blocks"
+                    + "（每个块形如 \"- scope: global\"）");
+        }
+        for (int i = 0; ; i++) {
+            String prefix = "inject.filters." + i + ".";
+            String scope = get(prefix + "scope", null);
+            List<String> libs = getList(prefix + "libs");
+            List<String> include = getList(prefix + "include");
+            List<String> exclude = getList(prefix + "exclude");
+            if (scope == null && libs.isEmpty() && include.isEmpty() && exclude.isEmpty()) {
+                break;    // 该块不存在，已读完
+            }
+            out.add(new InjectFilter(scope, libs, include, exclude, i));
+        }
+        return out;
     }
 
     /** 日志目录（相对路径基于目标进程工作目录） */

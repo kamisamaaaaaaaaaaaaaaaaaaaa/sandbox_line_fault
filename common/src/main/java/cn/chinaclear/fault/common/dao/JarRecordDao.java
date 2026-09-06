@@ -8,6 +8,9 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Timestamp;
 import java.util.Date;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
 
 /** 表1 t_jar_record：pending 占位插入、状态机查重与流转 */
 public final class JarRecordDao {
@@ -47,6 +50,30 @@ public final class JarRecordDao {
                         + " hostname=?, ip=?"
                         + " WHERE id=?",
                 new Object[]{classCount, methodCount, hostname, ip, id});
+    }
+
+    /**
+     * 批量查单元元信息（unit_type + source_jar），供模块侧判定注入名单的作用范围
+     * ——表2 只带 unit_id，方法属于应用代码还是哪个第三方 jar 需回到表1 才能确定。
+     * 单元数为个位数（1 个 CLASSES 单元 + 若干白名单 jar），一次查完，不分页。
+     */
+    public Map<Long, JarRecord> findByIds(List<Long> ids) {
+        Map<Long, JarRecord> out = new HashMap<>();
+        if (ids == null || ids.isEmpty()) {
+            return out;
+        }
+        StringBuilder in = new StringBuilder();
+        for (int i = 0; i < ids.size(); i++) {
+            if (i > 0) {
+                in.append(',');
+            }
+            in.append('?');
+        }
+        String sql = "SELECT * FROM t_jar_record WHERE id IN (" + in + ")";
+        for (JarRecord r : db.query(sql, ids.toArray(), JarRecordDao::map)) {
+            out.put(r.getId(), r);
+        }
+        return out;
     }
 
     static JarRecord map(ResultSet rs) throws SQLException {
