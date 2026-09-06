@@ -19,8 +19,7 @@
 - [7. 日志速查](#7-日志速查)
 - [8. 异常处理全景](#8-异常处理全景)
 - [9. 限制与边界](#9-限制与边界)
-- [10. 常见问题](#10-常见问题)
-- [11. 卸载](#11-卸载)
+- [10. 卸载](#10-卸载)
 
 ---
 
@@ -430,7 +429,13 @@ INFO 是里程碑；**过程明细为 DEBUG**（大项目/多节点并发时数�
 
 | 日志 | 含义 | 处理 |
 |---|---|---|
-| `HARD PROTECT: phase=...`（PARSE / DB / MOUNT 各形态，见 7.3） | 硬保护：写表4（尽力）后 kill 当前进程 | 见 7.3 对应行 |
+| `HARD PROTECT: phase=PARSE, msg=bootJar not located` | 未以 `-jar` 方式启动 | 改为 `java -javaagent:... -jar app.jar` 启动 |
+| `HARD PROTECT: phase=PARSE, ... 该开关与白名单不可同时为空` | `parse.classes.enabled=false` 且白名单没匹配到 jar，零解析单元 | 打开 classes 解析或修白名单 |
+| `HARD PROTECT: phase=PARSE, ... invalid config.yml / required config missing` | 配置非法 / 必填项缺失（含 `log.level` 非法、正则非法、留空） | 修正 `config.yml` 后重启（痕迹在 stdout/app.log，因配置不可用写不了 `logs/`） |
+| `HARD PROTECT: phase=DB, msg=schema check failed ...` | 库表未建/不可达 | 先执行 `schema.sql`；检查 `jdbc.*` 与网络 |
+| `HARD PROTECT: phase=DB, ... Communications link failure` | 数据库连不上 | 检查数据库存活、`jdbc.url`、防火墙 |
+| `HARD PROTECT: phase=MOUNT, type=TIMEOUT, msg=mount wait timeout（含 flock 串行化锁等待）` | 挂载超时（含等不到 attach 串行锁） | 检查 sandbox 安装与 `sandbox.home`；同机进程多时锁等待会拉长，适当调大 `mount.timeout.ms` |
+| `HARD PROTECT: phase=MOUNT, ... mount failed（flock -w Ns 等待串行化锁超时/脚本非 0 退出）exit code=1` | 挂载命令失败 | 开 `log.level=DEBUG` 看 `mount cmd` 下方的输出内容定位（权限/模块 jar 缺失/flock 缺失等） |
 | `config unavailable (missing/invalid), skip DB records (local log only)` | 配置不可用，表4 写不了，仅本地留痕 | 修正 `config.yml` |
 | `write t_error_record failed, fallback to local log only` | 表4 写失败（库不可达），退化为本地日志 | 恢复数据库后重启 |
 | `tmp reaper spawn failed (best effort, cleanup hygiene only)` | 临时副本托管进程启动失败（仅影响清理卫生，不影响注入） | 忽略或检查系统环境 |
@@ -473,18 +478,11 @@ INFO 是里程碑；**过程明细为 DEBUG**（大项目/多节点并发时数�
 | WARN | `decode bootJar param failed: ...` | 挂载命令参数解码失败 | 检查挂载命令与 agent 版本是否配套 |
 | WARN / ERROR | `jdbc driver resolved: <类名> -> loader=... codeSource=...`（module 侧同 agent） | 驱动加载成功（标准类名） | — |
 
-### 7.3 硬保护速查（agent 侧 HARD PROTECT 各形态）
+另有一条壳阶段失败的 ERROR 只出现在 stdout（此时日志文件尚未建立）：
 
 | 日志 | 含义 | 处理 |
 |---|---|---|
-| `HARD PROTECT: phase=PARSE, type=EXCEPTION, msg=bootJar not located` | 未以 `-jar` 方式启动 | 改为 `java -javaagent:... -jar app.jar` 启动 |
-| `HARD PROTECT: phase=PARSE, ... 该开关与白名单不可同时为空` | `parse.classes.enabled=false` 且白名单没匹配到 jar，零解析单元 | 打开 classes 解析或修白名单 |
-| `HARD PROTECT: phase=DB, msg=schema check failed ...` | 库表未建/不可达 | 先执行 `schema.sql`；检查 `jdbc.*` 与网络 |
-| `HARD PROTECT: phase=DB, ... Communications link failure` | 数据库连不上 | 检查数据库存活、`jdbc.url`、防火墙 |
-| `HARD PROTECT: phase=PARSE, ... invalid config.yml / required config missing` | 配置非法 / 必填项缺失（含 `log.level` 非法、正则非法、留空） | 修正 `config.yml` 后重启（痕迹在 stdout/app.log，因配置不可用写不了 `logs/`） |
-| `HARD PROTECT: phase=MOUNT, type=TIMEOUT, msg=mount wait timeout（含 flock 串行化锁等待）` | 挂载超时（含等不到 attach 串行锁） | 检查 sandbox 安装与 `sandbox.home`；同机进程多时锁等待会拉长，适当调大 `mount.timeout.ms` |
-| `HARD PROTECT: phase=MOUNT, ... mount failed（flock -w Ns 等待串行化锁超时/脚本非 0 退出）exit code=1` | 挂载命令失败 | 开 `log.level=DEBUG` 看 `mount cmd` 下方的输出内容定位（权限/模块 jar 缺失/flock 缺失等） |
-| `[fault-agent] HARD PROTECT: agent bootstrap failed: ...`（stdout） | 壳阶段失败：隔离 ClassLoader 初始化/反射调用失败，core 未跑起 | 检查 agent jar 完整性（是否被截断/改坏） |
+| `[fault-agent] HARD PROTECT: agent bootstrap failed: ...` | 隔离 ClassLoader 初始化/反射调用失败，core 未跑起 | 检查 agent jar 完整性（是否被截断/改坏） |
 
 ---
 
@@ -567,56 +565,23 @@ INFO 是里程碑；**过程明细为 DEBUG**（大项目/多节点并发时数�
 
 | 边界 | 原因 |
 |---|---|
-| `<clinit>`（静态初始化）不注入 | sandbox 在**类结构收集阶段**即硬编码排除（`ClassStructureImplByAsm$5$1.visitMethod`，无配置开关）；解析器同步排除，收录只会让表2 多出永不命中的行 |
+| `<clinit>`（静态初始化）不注入 | sandbox 在类结构收集阶段即硬编码排除（无配置开关）；解析器同步排除，收录只会让表2 多出永不命中的行 |
 | abstract 方法不注入 | 接口声明的抽象方法与抽象类的 abstract 方法没有 Code 属性，桩无处可插，注册后永不回调；解析阶段即排除 |
-| native 方法不注入 | sandbox 虽会去掉 native 并生成代理方法完成织入，但只插 BEFORE/RETURN/THROWS、**不插 LINE**（native 无 Code 属性也就没有行号表），本模块只监听 `beforeLine`，故同样永不回调；解析阶段即排除 |
+| native 方法不注入 | sandbox 虽会去掉 native 并生成代理方法完成织入，但只插 BEFORE/RETURN/THROWS、不插 LINE（native 无 Code 属性也就没有行号表），本模块只监听 `beforeLine`，故同样永不回调；解析阶段即排除 |
 | bridge / `access$xxx` synthetic 方法不注入 | 转发型 synthetic 方法体 1-2 行且行号指向原方法声明处，hook 会与目标方法重复命中；仅保留 `lambda$` 前缀 |
-| lambda（`lambda$xxx`）**会注入** | lambda 体内是用户逻辑；lambda 体被 javac 抽为原类的私有合成方法，有字节码有 LNT |
+| lambda（`lambda$xxx`）会注入 | lambda 体内是用户逻辑；lambda 体被 javac 抽为原类的私有合成方法，有字节码有 LNT |
 | `$$Lambda$` 运行时壳类不注入 | JVM 现场生成的转发壳，无 LNT、名字带随机序号、无业务逻辑 |
-| **JVM 入口 `main` 方法不注入** | sandbox 硬编码跳过（`UnsupportedMatcher.isJavaMainBehavior()`，无配置开关）。这对 premain 模式是保护：main 在挂载完成后才执行，若可注入则首个进程会在 main 首行被 kill，应用永远无法启动 |
-| **构造器 `super()` 之前的行不触发** | JVM 校验器约束：super() 前 `this` 为 `uninitializedThis`，行级探针需携带 `this`，压栈即 `VerifyError`；ASM 把探针推迟到 super() 之后，super() 前的 LNT 行被静默丢弃。静态方法首行不受此约束 |
-| 未实例化类的构造器行不出现在覆盖记录中 | 构造器从未执行，运行时不可达。**覆盖率应按"可达行"统计** |
-| 逻辑不可达分支不出现在覆盖记录中 | 分支可达性只有运行时可知，javap 基线无法静态判定 |
+| JVM 入口 `main` 方法不注入 | sandbox 硬编码跳过（无配置开关）。这对 premain 模式是保护：main 在挂载完成后才执行，若可注入则首个进程会在 main 首行被 kill，应用永远无法启动 |
+| 构造器 `super()` 之前的行不触发 | JVM 校验器约束：super() 前 `this` 为 `uninitializedThis`，行级探针需携带 `this`，压栈即 `VerifyError`；ASM 把探针推迟到 super() 之后，super() 前的 LNT 行被静默丢弃。静态方法首行不受此约束 |
+| 未执行的代码不出现在覆盖记录中 | 覆盖（即故障）只在代码真正执行时产生：未实例化类的构造器、逻辑不可达的分支等运行时不可达的行不会触发，覆盖率应按"可达行"统计 |
 | CGLIB/Spring 代理类不注入 | sandbox 排除 `$$EnhancerBySpringCGLIB$$` 等运行时生成类名；业务方法体在原始类，原始类正常织入 |
-| JDK 核心类 / native 方法默认不注入 | sandbox 对 `loader==null` 的类默认排除（`unsafe.enable` 可放开）；native 需 `isNativeSupported` 开关 |
-| **超过 64KB 的方法插桩后整体失效** | 行级插桩使方法字节码膨胀 2~3 倍，超限 → 整类 `VerifyError` → sandbox 回退原始字节码 → **该类所有行静默不增强**。排查：开 sandbox 的 dumpClass 或查 transform 失败记录 |
-| **线程名需具备稳定业务语义** | 判重键含线程名。若应用使用默认或动态线程名（如 `Thread-0`、`pool-1-thread-1`），重启后线程名变化会使判重键随之变化，故障次数将不再受 `inject.fault.times` 限制 |
-| 计数器按「行+线程+调用栈」占用内存 | 每个 (行,线程,调用栈) 组合一个 entry，用尽后移入只存 key 的已用尽集合；占用约为「按行计数」的（线程数 × 调用路径数）倍。递归方法的同一行在不同深度会产生不同调用栈摘要，使其调用路径数随深度增长 |
+| JDK 核心类不注入 | sandbox 对 `loader==null` 的类默认排除（`unsafe.enable` 可放开） |
+| 超过 64KB 的方法插桩后整体失效 | 行级插桩使方法字节码膨胀 2~3 倍，超限 → 整类 `VerifyError` → sandbox 回退原始字节码 → 该类所有行静默不增强。排查：开 sandbox 的 dumpClass 或查 transform 失败记录 |
+| 线程名需具备稳定业务语义 | 判重键含线程名。若应用使用默认或动态线程名（如 `Thread-0`、`pool-1-thread-1`），重启后线程名变化会使判重键随之变化，故障次数将不再受 `inject.fault.times` 限制 |
 | 必须以 `-jar` 启动 | bootJar 路径从启动参数定位 |
-| 无 `-Dfault.tag` 则进程被 kill | 无轮次标识无法判重，按硬保护不放行 |
-| 全量行 hook 有性能开销 | 仅本轮未命中行存在；已命中/已抢占行有内存短路 |
-| 基于 JVM-Sandbox 1.4.0 | 无 `withLoad()`；watcher 常驻 matcher 对后加载类天然生效 |
 
 ---
 
-## 10. 常见问题
-
-**Q1：应用启动后没被 kill，是故障没挂上吗？**
-不一定。kill 只在该行该线程本轮故障次数尚未用尽、且执行到时触发。看模块日志是否有 `inject done: injected=N methods`（`N > 0` 表示已注入）；用 `curl` 打一个会走业务方法的接口验证。若已挂载且方法执行过，检查该行该线程本轮是否已达 `inject.fault.times` 次（`t_fault_record` 按 tag 查）。
-
-**Q2：换了一版应用重启，为什么又解析了一次？**
-应用内容变化 → 解析单元 hash 变化 → 自动重新解析并生成新 unitId。旧单元结果保留，属于预期行为。
-
-**Q3：重启后没有 kill，直接起来了？**
-该轮 tag 下启动必经的行都已被记录过（判重放行）。换一个新 tag 即可开始新一轮。
-
-**Q4：多节点集群会不会全死？**
-不会。同一行同一轮最多死一个节点（数据库唯一索引保证），各节点死于不同行时会各死一次。
-
-**Q5：为什么 agent 和 module 的 `jdbc.driver` 填的不一样？**
-agent 依赖收进嵌套 core jar 由隔离 ClassLoader 加载，类名保持原名；module 运行在 sandbox 独立 classloader。两侧 `jdbc.driver` 统一填驱动的标准类名，详见 [5.7](#57-agent-隔离类加载嵌套-jar)。
-
-**Q6：一行到底会发生多少次故障？**
-`inject.fault.times` 是**每行每线程每调用栈**的上限。同一行被 T 个线程、S 种调用栈执行时，本轮最多 T × S × N 次故障；每个「行+线程+调用栈+第几次」组合在集群内只死一个节点。表3 中同一行会有多条记录，靠 `stack_hash` 区分调用路径、靠 `fault_seq` 区分第几次。
-
-**Q7：加了调用栈判重后应用明显变慢，正常吗？**
-正常，且是既定代价。判重键含调用栈摘要，摘要只能由取栈算出，因此每次行回调都要做一次完整栈遍历。用 `inject.filters` 缩小注入范围可直接降低这部分开销；若某行存在递归，同一行在不同递归深度会产生不同摘要、故障机会数随深度增长，可在 `inject.filters` 的块内用 `exclude` 把递归方法排除。
-
-**Q8：想临时不让 agent 干活？**
-把 `mount.enabled` 设为 `false` 可只解析不注入；从启动命令去掉 `-javaagent` 参数重启则完全不介入（不要用其它方式绕过，无 tag 时进程会被 kill）。
-
----
-
-## 11. 卸载
+## 10. 卸载
 
 演练结束：从启动命令移除 `-javaagent` 参数与 `-Dfault.tag`，重启应用即恢复原状（模块 jar 可留在 sandbox-module 目录，不影响未挂载的进程）。
