@@ -92,7 +92,6 @@ JDK9 起 `-jar` 及其路径被归入 main 侧参数，不出现在 `RuntimeMXBe
   - **native 方法排除**：`rewriteNativeMethod` 会去掉 `ACC_NATIVE`、装上方法体并生成 `ACC_PRIVATE|ACC_NATIVE|ACC_FINAL` 代理方法，因此它**确实被织入了**——但只插 `spyMethodOnBefore` / `spyMethodOnReturn` / `spyMethodOnThrows`，**不插 `spyMethodOnLine`**（native 无 Code 属性，也就没有 LineNumberTable，没有行号可报；对比 `rewriteNormalMethod` 重写了 `visitLineNumber`）。本模块只监听 `beforeLine`，故 native 方法注册后同样永不回调，一并排除。
     > 两者失败点不同：abstract 卡在「桩没插上」，native 卡在「桩插了但没有 LINE 事件」。若将来接入 BEFORE/RETURN 事件，需要重新评估 native 的取舍。
   - **synthetic 方法仅纳入 `lambda$` 前缀**：lambda 体内是用户逻辑；bridge / `access$xxx` 等转发型 synthetic 方法体 1-2 行且行号指向原声明处，hook 会与目标方法重复命中。
-  > 排查提醒：确认这类过滤逻辑时**直接读 `BootJarParser` 源码**——关键词检索（`isSynthetic` / `clinit`）在 `Opcodes.ACC_SYNTHETIC` 与字符串常量上可能漏命中。
 - **注入阶段的过滤块**（`inject.filters`）：解析落表2 是全量的，过滤只作用于注入阶段。判定方法属于哪个作用范围需要回到表1 取单元的 `unit_type` 与 `source_jar`——表2 只带 `unit_id`，单看方法无法区分它来自应用代码还是哪个第三方 jar，这是模块侧要在 inject 开始时额外查一次单元元信息的原因。
   - 各块**按配置顺序串行作用**：作用范围不覆盖该方法所属单元的块不表态；范围覆盖的块内先 `include` 选入（空 = 全选）再 `exclude` 过滤，**任一块把方法拦下即不注入**。
   - 于是范围互斥的块（`class` 与 `lib`）互不表态、各自管各自；范围重叠的块（`global` 与 `class`）需逐块过关——这就是"被任一块过滤掉就不能注入"的语义，与"取并集""首个命中块生效"都不相同。
@@ -328,9 +327,9 @@ agent 与 sandbox module 仅通过 DB 表与进程调用交互，无跨 loader �
 
 自写 `FaultLogger`：同步写文件（`logs/fault-agent.log` / `logs/fault-module.log`）+ stdout，时间戳 + 线程名 + 级别，异常带堆栈；日志目录不可写时降级为仅 stdout。
 
-关键分支全覆盖：premain 各阶段、驱动解析结果、单元登记与跳过判定（首次/已完成跳过/未完成重解析）、注入过滤概况、mount 命令与输出、命中与抢占、冲突放行、kill 执行结果与兜底分支。
+级别阈值过滤（`log.level`，agent / module 各自配置，默认 INFO）：DEBUG < INFO < WARN < ERROR 四级，低于阈值的日志 stdout 与文件都不输出，非法值按配置非法硬保护。阈值在字符串格式化前短路。级别语义：INFO 只保留里程碑（各阶段完成、驱动解析、单元入库、注入完成、故障命中、硬保护），WARN/ERROR 出现即需关注；`debug()` 当前仅用于多节点抢空的冲突放行分支（与冲突次数成正比，INFO 下静默）。全量清单见 README 第 7 章。
 
-> 日志路径提示：agent 的 `log.dir` 可由 `-javaagent` 参数覆盖到独立目录；模块的 `log.dir` 来自模块自己的 `config.yml`，相对路径基于目标进程工作目录。
+关键分支全覆盖：premain 各阶段、驱动解析结果、单元登记与跳过判定（首次/已完成跳过/未完成重解析）、注入过滤概况、mount 命令与输出、命中与抢占、冲突放行、kill 执行结果与兜底分支。
 
 ---
 

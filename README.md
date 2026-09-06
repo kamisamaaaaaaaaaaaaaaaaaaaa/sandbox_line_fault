@@ -386,11 +386,12 @@ agent 已内置清理守护（挂载完成后在 JVM 内同步快照副本清单
 
 日志位于 `<log.dir>/fault-agent.log` 与 `<log.dir>/fault-module.log`。
 
-> 注意：agent 的 `log.dir` 可由 `-javaagent` 参数指定到独立目录；**模块的 `log.dir` 来自模块自己的 `config.yml`**，相对路径基于目标进程工作目录。同一台机器上多个进程若共用工作目录，模块日志会写到同一个文件。
+> 注意：agent 与模块的 `log.dir` / `log.level` 各自来自自己的 `config.yml`，相对路径基于目标进程工作目录。同一台机器上多个进程若共用工作目录，模块日志会写到同一个文件。
 
 级别阈值由 `log.level` 控制（agent / module 各自配置，默认 `INFO`）：低于阈值的日志 stdout 与文件都不输出。
-INFO 是里程碑；**过程明细为 DEBUG**（大项目/多节点并发时数量与规模成正比，排查时临时调 DEBUG）；
-故障命中 `FAULT HIT & PREEMPTED` 是 INFO（kill 前最后一条，永远输出）；WARN / ERROR 出现即需要关注。
+INFO 覆盖各阶段里程碑与注入过程概况；WARN / ERROR 出现即需要关注；
+故障命中 `FAULT HIT & PREEMPTED` 为 INFO（kill 前最后一条，永远输出）。
+当前唯一的 DEBUG 日志是 module 侧的多节点冲突放行（`already preempted`，数量与集群冲突次数成正比，默认静默，排查多节点问题时临时调 DEBUG）。
 
 ### 7.1 agent 日志
 
@@ -407,14 +408,11 @@ INFO 是里程碑；**过程明细为 DEBUG**（大项目/多节点并发时数�
 | `unit stored: type=CLASSES source=... unitId=N classes=A methods=B` | 该解析单元解析完成入库 |
 | `premain completed: mount OK, release application startup` | 应用开始启动（此刻起已处于保护中） |
 | `mount.enabled=false -> parse-only mode ...` | 纯解析模式放行（不挂载不注入） |
-
-**DEBUG（过程明细）**
-
-| 日志 | 含义 |
-|---|---|
 | `unit already completed, skip: ... unitId=N` | 该单元此前已解析，跳过 |
-| `mount cmd: [bash, ..., -d, fault-module/inject?id=...]` | 正在执行挂载命令（完整命令行） |
+| `mount cmd: [flock, -w, N, <锁文件>, bash, ..., -d, fault-module/inject?id=...]` | 正在执行挂载命令（完整命令行） |
 | `sandbox.sh exit=N output: <全文>` | sandbox.sh 退出码与完整输出（挂载排障用） |
+| `tmp reaper spawned: watching pid=... files=[...]` | 临时副本清理守护已启动（等本进程消亡后删除 sandbox 模块临时副本） |
+| `tmp reaper skipped: no sandbox module temp copy held by pid=...` | 本进程未持有模块临时副本，无需清理守护 |
 
 **WARN**
 
@@ -447,21 +445,21 @@ INFO 是里程碑；**过程明细为 DEBUG**（大项目/多节点并发时数�
 | 日志 | 含义 |
 |---|---|
 | `bootJar resolved: <路径> (hash=...)` | 挂载命令参数定位 bootJar 成功 |
-| `inject skipped: units already injected` | 重复执行挂载命令被忽略（本 tag 已注入过） |
+| `inject requested, unitIds=... tag=... batchSize=...` | 收到挂载命令，开始注入流程 |
+| `filters: N block(s), applied in order -> [scope=... libs=N include=N exclude=N, ...]` | 过滤块概况（`N block(s)` = 0 表示无过滤块，所有方法都是候选） |
+| `unit: id=... type=... source=...` | 本轮生效的解析单元明细 |
+| `batch registered: scanned=M rows, classes=C, injected=N methods, cursor=类名#方法名` | **每批**注入情况：`M` 本批扫过的 `t_class_method` 行数、`C` 本批注册的类数（Class 级）、`N` 本批实际注入的方法数（方法级，一个方法名覆盖其全部重载）、`cursor` 本批断点（各批游标严格递增即说明无重复注册） |
+| `no method kept after include/exclude filtering, skip class: ...` | 该类的方法全部被名单过滤掉，整类跳过（**每个类一条**，大项目较多） |
 | `skipped classes (no method kept): N` | 因名单过滤而整类跳过的类数汇总 |
 | `inject done: injected=N methods, scanned=S rows, tag=...` | 注入完成：`N` **注入故障总数**（方法名数）、`S` 累计扫过的行数。`S > N` 说明存在同名重载行被去重（同一方法名只注入一次） |
+| `jdbc driver resolved: <类名> -> loader=... codeSource=...` | 驱动加载成功（module 侧标准类名） |
 | `FAULT HIT & PREEMPTED: tag=... unitId=... class=... method=... line=... seq=k/N thread=... stackHash=... machine=...` 换行接 `call stack (N frames):` 与逐帧调用栈 | **故障命中（kill 前最后一条）**：该行该线程该调用栈本轮第 k 次故障（上限 N），调用栈已打印并随记录入库，进程即将被 kill。多节点并发时仅赢得抢占的节点打印 |
 
 **DEBUG（过程明细）**
 
 | 日志 | 含义 |
 |---|---|
-| `inject requested, unitIds=... tag=... batchSize=...` | 收到挂载命令，开始注入流程 |
-| `filters: N block(s), applied in order -> [scope=... libs=N include=N exclude=N, ...]` | 过滤块概况（`N block(s)` = 0 表示无过滤块，所有方法都是候选） |
-| `unit: id=... type=... source=...` | 本轮生效的解析单元明细 |
-| `batch registered: scanned=M rows, classes=C, injected=N methods, cursor=类名#方法名` | **每批**注入情况：`M` 本批扫过的 `t_class_method` 行数、`C` 本批注册的类数（Class 级）、`N` 本批实际注入的方法数（方法级，一个方法名覆盖其全部重载）、`cursor` 本批断点（各批游标严格递增即说明无重复注册） |
-| `no method kept after include/exclude filtering, skip class: ...` | 该类的方法全部被名单过滤掉，整类跳过（**每个类一条**，大项目较多） |
-| `fault seq already preempted in this round (tag=...), release execution: class#method#line#thread#stackHash seq=k` | 该行该线程该调用栈本轮的第 k 次故障已被他节点/进程触发，本节点放行（**多节点并发时与冲突次数成正比**） |
+| `fault seq already preempted in this round (tag=...), release execution: class#method#line#thread#stackHash seq=k` | 该行该线程该调用栈本轮的第 k 次故障已被他节点/进程触发，本节点放行（**多节点并发时与冲突次数成正比**，这也是 module 侧唯一的 DEBUG 日志） |
 
 **WARN / ERROR（出现即需要关注）**
 
@@ -476,7 +474,6 @@ INFO 是里程碑；**过程明细为 DEBUG**（大项目/多节点并发时数�
 | ERROR | `kill not effective, rollback fault record and release: ...` | kill 手段未生效，回滚故障记录并放行 | 检查进程环境（罕见） |
 | WARN / ERROR | `write t_error_record failed (local log only)` | 表4 写失败（库不可达），仅本地留痕 | 恢复数据库 |
 | WARN | `decode bootJar param failed: ...` | 挂载命令参数解码失败 | 检查挂载命令与 agent 版本是否配套 |
-| WARN / ERROR | `jdbc driver resolved: <类名> -> loader=... codeSource=...`（module 侧同 agent） | 驱动加载成功（标准类名） | — |
 
 另有一条壳阶段失败的 ERROR 只出现在 stdout（此时日志文件尚未建立）：
 
