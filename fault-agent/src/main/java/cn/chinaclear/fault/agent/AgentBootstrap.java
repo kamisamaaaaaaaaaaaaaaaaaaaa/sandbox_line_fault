@@ -57,6 +57,16 @@ public final class AgentBootstrap {
             if (config.mountEnabled()) {
                 // fail-fast：挂载必需 sandbox.home（必填），缺失则不必白跑解析，直接硬保护
                 config.sandboxHome();
+                // tmpdir 自建兜底（幂等）：systemd 部署的 ExecStartPre、手工部署漏配时，
+                // agent 自建目录，避免挂载阶段 copyToTempFile 因目录缺失失败（No such file）；
+                // 创建失败同样不必白跑解析——挂载必失败，直接硬保护 MOUNT
+                try {
+                    java.nio.file.Files.createDirectories(
+                            java.nio.file.Paths.get(System.getProperty("java.io.tmpdir")));
+                } catch (java.io.IOException e) {
+                    throw HardProtectException.exception("MOUNT",
+                            "create java.io.tmpdir failed: " + e.getMessage(), stackOf(e), null, bootJar);
+                }
             }
             List<Long> unitIds = ParseOrchestrator.parseAndStore(config, bootJar, parseDeadline);
             if (!config.mountEnabled()) {

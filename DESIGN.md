@@ -162,19 +162,41 @@ flock -w <等待秒> <user.home>/.fault-sandbox-attach.lock bash <sandbox.sh> -p
 
 **另一条独立的静默失败路径**：`sandbox.sh` 内部用 `curl -N -s` 发命令，**不校验 HTTP 状态码**——模块命令返回 5xx 时脚本仍 `exit 0`。典型场景：模块 jar 的临时副本被误删 → 模块报 `config.yml not found` → inject 实际失败 → 进程"挂载成功"地空跑、watch 根本没注册。对策：`SandboxMountInvoker` 检测输出中的 Jetty 错误页标识 `Problem accessing` → 硬保护 `MOUNT`。
 
-#### 3.2.4 临时副本清理（TmpReaper）
+#### 3.2.4 临时副本清理
 
-sandbox 每次挂载通过 `File.createTempFile` 把模块 jar 复制一份到临时目录（`ModuleJarClassLoader.copyToTempFile`，**运行期延迟读取**），副本仅在**模块卸载**或 **JVM 正常退出**时清理。故障注入的每次命中都是 `kill -9`，两条清理路径都走不到 → **副本必然泄漏**（每个约 4.8M；覆盖演练进程反复重启，数百次即可写满小磁盘）。
+sandbox 每次挂载通过 `File.createTempFile` 把模块 jar 复制一份到临时目录（`ModuleJarClassLoader.copyToTempFile`，**运行期延迟读取**），副本仅在**模块卸载**或 **JVM 正常退出**时清理。故障注入的每次命中都是 `kill -9`，两条清理路径都走不到 → **副本必然泄漏**（每个约 4.8M；覆盖演练进程反复重启，数百次即可写满临时目录）。
 
-**方案（agent 内置，部署方零感知）**：挂载完成后先**在 JVM 内同步**快照副本清单，再 spawn 一个脱离会话的清理守护：
+两个放大因素（2026-09-07 生产事故确认）：
 
-1. **快照必须由 JVM 自己完成**：从 `/proc/self/fd` 用 `Files.readSymbolicLink` 逐个解析出本进程持有的副本路径（按 `sandbox_module_jar_` 过滤去重）。
-   > 不能把快照交给 shell：shell 启动（fork+exec+bash 初始化约 10~50ms）与"挂载完很快就被注入 kill"存在竞态——JVM 先死则 shell 读 `/proc/<pid>/fd` 得到空列表，清理被静默跳过。而 JVM 内快照发生在 premain 内、premain 返回前，注入 kill 不可能早于它，因此无竞态。
-2. 清单作为 **argv 传给 reaper**：该删什么在 spawn 那一刻已固定，与 `/proc` 是否还存在彻底解耦；reaper 只做"等 pid 消亡 + 删参数里的文件 + 自杀"。
-3. **pid 复用免疫**：比对 `/proc/<pid>/stat` 的 starttime（进程启动时刻），pid 被内核复用给新进程时 starttime 必然变化 → 立即判定原进程已死。
-4. `setsid` 脱离会话；spawn 失败仅记日志——清理属卫生措施，与故障注入的覆盖完整性无关，**不适用硬保护**。
+- **复制的是 `sandbox-module/` 下全部模块 jar**，不止本工具的：生产目录 6 个模块，4 个是其他团队的 `*-jar-with-dependencies.jar`（体积大）——每轮重启产生 6 份副本，写入量由"所有模块 × 重启频率"决定
+- **systemd 部署下清理进程本身会被连坐**：`KillMode=mixed` + `Restart=on-failure` 时，服务重启的停止阶段对 cgroup 内除 Main PID 外的所有进程 SIGKILL——agent spawn 的清理守护在轮询间隔（秒级）内即被杀，`rm` 从未执行。生产复现：471 轮泄漏约 2800 份写满 /tmp → `copyToTempFile` 报 `No space left on device` → 模块注册失败 → 挂载 404
 
-边界：systemd 停服务按 cgroup 连带杀死 reaper 时清理不执行（可由低频 cron 兜底；k8s 每 Pod 的 emptyDir 随 Pod 销毁则天然无此问题）。可选加固：给每个进程独立 `-Djava.io.tmpdir`。
+**方案（两层）**：
+
+1. **主力：ExecStopPost 清扫（systemd 部署，`add-agent-to-service.sh` 自动注入）**
+
+   ```ini
+   ExecStartPre=/bin/mkdir -p tmp
+   ExecStart=... -Djava.io.tmpdir=tmp ...
+   ExecStopPost=/bin/sh -c 'rm -f tmp/sandbox_module_jar_*.jar'
+   ```
+
+   - **独立 tmpdir**（相对 `WorkingDirectory`，路径零硬编码）：副本落进应用独占目录，与共享 /tmp、其他团队的模块写入隔离；目录由 `ExecStartPre` 创建（JVM 不会自建），premain 内另有 `Files.createDirectories` 兜底
+   - **ExecStopPost 在 cgroup 清理之后执行**，不受连坐影响——本轮泄漏本轮清扫，覆盖全部退出路径（命中 kill / 运维 restart / 绕过 systemd 直接 kill / 正常停服务），包括"最后一轮"
+   - `File.createTempFile` 以进程 cwd 解析相对 tmpdir（cwd 即 `WorkingDirectory`），`/proc/<pid>/fd` 看到的是解析后的绝对路径，TmpReaper 快照不受影响
+   - system manager 与 user manager 的 KillMode/cgroup 行为一致（user unit 实测等价）
+
+2. **兜底：TmpReaper（非 systemd 部署）**——挂载完成后**在 JVM 内同步**快照副本清单，spawn 一个脱离会话的清理守护：
+
+   1. **快照必须由 JVM 自己完成**：从 `/proc/self/fd` 用 `Files.readSymbolicLink` 逐个解析出本进程持有的副本路径（按 `sandbox_module_jar_` 过滤去重）。
+      > 不能把快照交给 shell：shell 启动（fork+exec+bash 初始化约 10~50ms）与"挂载完很快就被注入 kill"存在竞态——JVM 先死则 shell 读 `/proc/<pid>/fd` 得到空列表，清理被静默跳过。而 JVM 内快照发生在 premain 内、premain 返回前，注入 kill 不可能早于它，因此无竞态。
+   2. 清单作为 **argv 传给 reaper**：该删什么在 spawn 那一刻已固定，与 `/proc` 是否还存在彻底解耦；reaper 只做"等 pid 消亡 + 删参数里的文件 + 自杀"。
+   3. **pid 复用免疫**：比对 `/proc/<pid>/stat` 的 starttime（进程启动时刻），pid 被内核复用给新进程时 starttime 必然变化 → 立即判定原进程已死。
+   4. `setsid` 脱离会话；spawn 失败仅记日志——清理属卫生措施，与故障注入的覆盖完整性无关，**不适用硬保护**。
+
+   局限：systemd 部署下该守护会被连坐杀死（见上），故仅作非 systemd 环境的兜底；k8s 每 Pod 的 tmp 目录随 Pod 销毁天然无此问题。
+
+事故中值得记录的保护行为：/tmp 写满后，mount 静默失败被错误页检测（见 3.2.3）识别，硬保护 kill 没有放行一个"看起来挂载成功、实际零覆盖"的进程——泄漏是缓慢恶化的运维问题，而保护语义始终成立。
 
 ---
 

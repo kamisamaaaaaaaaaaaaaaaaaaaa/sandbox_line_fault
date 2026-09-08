@@ -7,14 +7,21 @@
 #   1) 删除重启次数限制行（StartLimitIntervalSec / StartLimitInterval / StartLimitBurst）
 #   2) ExecStart 的 java 命令插入 -javaagent:<agentJar>（已有则整参替换——包括原有的
 #      agentArgs，幂等；旧式的 -javaagent= 等号写法是 JVM 非法参数，会被一并纠正为冒号）
-#   3) 提供第 3 个参数时，写入/替换 -Dfault.tag=<tag>（幂等）；不提供则仅输出提醒
+#   3) 模块副本清理配置（幂等，防 /tmp 被副本写满——见 README 6.4）：
+#      - ExecStartPre=/bin/mkdir -p tmp      保证 java.io.tmpdir 存在（相对 WorkingDirectory）
+#      - ExecStart 插入 -Djava.io.tmpdir=tmp 模块副本落进应用独占目录，不写共享 /tmp
+#      - ExecStopPost 删除 tmp 下的模块副本  systemd 重启的停止阶段会连坐杀死 reaper
+#        （KillMode=mixed），清理必须在停止阶段由 ExecStopPost 完成
+#      前提：service 有 WorkingDirectory=（三行的 tmp 相对它解析，路径零硬编码）；
+#      应用已自带 -Djava.io.tmpdir 时不覆盖，输出提醒人工核对 ExecStopPost 目录
+#   4) 提供第 3 个参数时，写入/替换 -Dfault.tag=<tag>（幂等）；不提供则仅输出提醒
 #
 # 修改前自动备份为 <service>.bak.<时间戳>；改完需 systemctl daemon-reload + restart 生效。
 set -euo pipefail
 
 usage() {
     echo "用法: $0 <agentJar绝对路径> <service文件路径> [轮次tag]"
-    echo "示例: $0 /app/agent/fault-agent-1.0.0.jar /etc/systemd/system/focus@.service round-001"
+    echo "示例: $0 /app/deploy/fault-agent-1.0.0.jar /etc/systemd/system/focus@.service round-001"
     exit 1
 }
 
@@ -61,7 +68,38 @@ else
     exit 1
 fi
 
-# --- 3) ExecStart 写入/替换 -Dfault.tag（提供了第 3 参数时）---
+# --- 3) 模块副本清理配置（防 /tmp 写满，见 README 6.4）---
+# 三行均使用相对 WorkingDirectory 的 tmp，路径零硬编码（换应用/换部署根目录无需改动）
+if ! grep -Eq '^[[:space:]]*WorkingDirectory=' "$SERVICE_FILE"; then
+    echo "警告: service 无 WorkingDirectory=，跳过副本清理配置（tmp 相对路径无解析基准）"
+else
+    # 3a) 启动前创建 tmp（幂等）
+    if grep -Eq '^[[:space:]]*ExecStartPre=/bin/mkdir -p tmp$' "$SERVICE_FILE"; then
+        echo "ExecStartPre（创建 tmp 目录）已存在，跳过"
+    else
+        sed -i "/^[[:space:]]*ExecStart=/i ExecStartPre=/bin/mkdir -p tmp" "$SERVICE_FILE"
+        echo "已添加 ExecStartPre（创建 tmp 目录）"
+    fi
+
+    # 3b) ExecStart 插入 -Djava.io.tmpdir=tmp（幂等：应用已有该参数时不覆盖）
+    if grep -Eq -- '-Djava\.io\.tmpdir=' "$SERVICE_FILE"; then
+        echo "警告: ExecStart 已含 -Djava.io.tmpdir=，未覆盖——请人工确认 ExecStopPost 清扫目录与之匹配"
+    else
+        sed -i -E "s|(^[[:space:]]*ExecStart=.*)(-jar )|\1-Djava.io.tmpdir=tmp \2|" "$SERVICE_FILE"
+        echo "已插入 -Djava.io.tmpdir=tmp（模块副本落进应用独占目录）"
+    fi
+
+    # 3c) ExecStopPost 清扫（幂等）——必须插入 [Service] 节内（ExecStart 之前），
+    #     追加到文件尾会落入 [Install] 节被 systemd 忽略
+    if grep -q 'sandbox_module_jar_' "$SERVICE_FILE"; then
+        echo "ExecStopPost 副本清扫已存在，跳过"
+    else
+        sed -i "/^[[:space:]]*ExecStart=/i ExecStopPost=/bin/sh -c 'rm -f tmp/sandbox_module_jar_*.jar'" "$SERVICE_FILE"
+        echo "已添加 ExecStopPost（停止阶段清扫模块副本）"
+    fi
+fi
+
+# --- 4) ExecStart 写入/替换 -Dfault.tag（提供了第 3 参数时）---
 if [ -n "$TAG" ]; then
     if grep -Eq '^[[:space:]]*ExecStart=.*-Dfault\.tag=' "$SERVICE_FILE"; then
         sed -i -E "s|(^[[:space:]]*ExecStart=.*)-Dfault\.tag=[^[:space:]]+|\1-Dfault.tag=${TAG_ESC}|" "$SERVICE_FILE"
@@ -83,7 +121,7 @@ if [ -n "$TAG" ] && ! grep -Fq -- "-Dfault.tag=${TAG}" "$SERVICE_FILE"; then
 fi
 
 echo "修改完成: $SERVICE_FILE"
-grep -nE '^(StartLimit|ExecStart=)' "$SERVICE_FILE" || true
+grep -nE '^(StartLimit|ExecStart|ExecStartPre|ExecStopPost)=' "$SERVICE_FILE" || true
 echo
 echo "后续步骤（需 root）："
 echo "  1. systemctl daemon-reload"

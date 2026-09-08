@@ -11,7 +11,7 @@ import java.util.List;
 import java.util.Set;
 
 /**
- * 临时副本清理守护（"临终托孤"）：
+ * 临时副本清理守护（"临终托孤"）——**非 systemd 部署的兜底**：
  * 挂载完成后，先【在 JVM 内同步】快照本进程当前打开的 sandbox 模块临时副本清单，
  * 再 spawn 一个脱离会话的后台 shell，把清单作为 argv 传给它——
  * shell 轮询 /proc/<pid>，本进程消亡（kill -9 / 正常退出）后删除清单中的文件并自杀。
@@ -19,6 +19,12 @@ import java.util.Set;
  * 为什么需要：sandbox 每次挂载把模块 jar 复制一份到临时目录（File.createTempFile），
  * 卸载/正常退出时会清理，但 kill -9 走不到任何清理路径，副本必然泄漏（每个约 4.8M，
  * 覆盖演练进程反复重启即可写满磁盘）。
+ *
+ * **角色定位（2026-09-08 生产事故后调整）**：systemd 部署（KillMode=mixed + Restart=on-failure）
+ * 下，服务重启的停止阶段会对 cgroup 内除 Main PID 外的所有进程 SIGKILL——reaper 在轮询间隔内
+ * 即被连坐杀死，rm 从未执行（生产复现：471 轮泄漏 6×N 份写满 /tmp，见 TEST_CASES M 系列）。
+ * 因此 **systemd 部署以 service 的 ExecStopPost 清扫为准**（add-agent-to-service.sh 自动注入
+ * 独立 tmpdir 与清扫行），本类仅兜底非 systemd 环境（进程组/会话级死亡仍有效）。
  *
  * 设计要点：
  * 1. 快照必须由 JVM 自己完成，不能交给 shell——shell 启动（fork+exec+bash 初始化，约 10~50ms）
@@ -28,8 +34,8 @@ import java.util.Set;
  * 2. 清理精确性：只删快照中的具体路径，不扫描临时目录，不碰任何其他进程的文件。
  * 3. pid 复用免疫：比对 /proc/<pid>/stat 的 starttime（进程启动时刻），
  *    pid 被内核复用给新进程时 starttime 必然变化，立即判定原进程已死。
- * 4. setsid 脱离会话，避免被父进程组连带清理；spawn 失败仅记日志——
- *    清理属卫生措施，与故障注入的覆盖完整性无关，不适用硬保护。
+ * 4. setsid 脱离会话，避免被父进程组连带清理（对 systemd 的 cgroup 级清理无效，见上）；
+ *    spawn 失败仅记日志——清理属卫生措施，与故障注入的覆盖完整性无关，不适用硬保护。
  */
 final class TmpReaper {
 

@@ -406,6 +406,31 @@ IfaceImpl: <init> / apiAbstract
 | L3 | `log.level: TRACE`（非法值） | 配置非法硬保护：写表4 后 kill，消息含允许值 | ✅ 通过（`HARD PROTECT: phase=PARSE, ... invalid log.level: "TRACE"（允许值：DEBUG / INFO / WARN / ERROR）` → KILL） |
 | L4 | module 侧级别语义（需 Linux） | `FAULT HIT & PREEMPTED` 为 INFO（kill 前输出）；`already preempted` 默认 INFO 下静默、DEBUG 下出现；重复执行命中不再刷屏 | ☐ 待 Linux 环境（192.168.193.129）随 TC3/TC5 复验 |
 
+## systemd 副本清理（M 系列，2026-09-08）
+
+> 生产事故（focus@nwtr-de.service）：`KillMode=mixed` + `Restart=on-failure` 下，服务重启的停止阶段对
+> cgroup 内除 Main PID 外的所有进程 SIGKILL，TmpReaper 在轮询间隔内被连坐杀死、`rm` 从未执行，
+> 471 轮 × 6 份副本（sandbox 每次挂载复制 `sandbox-module/` 下全部 6 个模块 jar）写满 /tmp →
+> `copyToTempFile` 报 `No space left on device` → 模块未注册 → 挂载 404 → 硬保护 kill。
+> 方案：service 注入 `ExecStartPre`（建目录）+ `-Djava.io.tmpdir=tmp`（相对 WorkingDirectory）
+> + `ExecStopPost` 清扫；TmpReaper 降级为非 systemd 环境兜底。
+> 验证环境：测试机 192.168.193.129（systemd 245，user unit——与 system unit 行为等价）。
+
+| # | 内容 | 预期 | 结果 |
+| --- | --- | --- | --- |
+| M1 | KillMode=mixed 连坐实证（user unit：worker spawn reaper 后长驻 → kill -9 主进程 → restart） | 旧 reaper 未及清理即被杀 | ✅ 通过（journal：`Killing process 2869 (bash) with SIGKILL`；EXECUTED CLEANUP 未出现、清理标记不存在；新 worker+reaper 正常顶上） |
+| M2a | 修复组：ExecStartPre（mkdir tmp）+ `-Djava.io.tmpdir=tmp` + ExecStopPost（rm 副本）；worker 每轮创建 6 份副本 | kill 后 restart：副本收敛到当前轮 6 份，无累积 | ✅ 通过（T+8s=6=当前活 worker 份额；连续多轮 restart 均收敛，与 restart 新进程无副本竞争） |
+| M2b | 对照组：无 ExecStopPost（依赖 reaper） | kill 后 restart：残留 6 + 新 6 = 12，每轮 +6 累积 | ✅ 通过（T+8s=12；两轮运行残留 18/12 与累积模型一致） |
+| M2c | 多模块完整回归（真实 sandbox + copyToTempFile） | 独立 tmpdir 下多模块副本全清、挂载/注入正常 | ☐ 待生产部署时按 PLAN 第 6 节止血步骤回归 |
+
+> M1 直接证据：主进程 kill -9 后 systemd 停止阶段立即 `Killing process <reaper-pid> (bash) with SIGKILL`
+> ——reaper 轮询间隔（秒级）恒大于 cgroup 清理延迟（毫秒级），竞态结构上必输，与生产 471 轮全泄漏一致。
+> M2a 附加发现：RestartSec=0 时 ExecStopPost 通配可能删到 restart 新进程刚创建的副本（生产 RestartSec=30s 无此风险）。
+> 脚本验证抓到并修复的注入 bug：ExecStopPost 初版以 `>>` 追加到 service 文件尾，落入 `[Install]` 节被
+> systemd 忽略（`systemd-analyze verify` 报 `Unknown key 'ExecStopPost' in section 'Install'`）——已改为
+> sed 锚定 ExecStart 行前插入（[Service] 节内），重测：两遍执行 diff 一致（幂等）、ExecStopPost 落位
+> [Service] 节内、`systemd-analyze verify` 干净。
+
 > 第二个问题在本次实验中暴露为：`parse.classes.enabled=false` 生效、白名单却不生效，
 > 于是本轮零解析单元 → 触发了 P2 的硬保护。硬保护把配置失效拦在了启动阶段，没有放行空跑进程。
 > 默认构造器方法体只有 `super()` + `return`，而 sandbox 的织入刻意绕开 `super()`/`this()`
