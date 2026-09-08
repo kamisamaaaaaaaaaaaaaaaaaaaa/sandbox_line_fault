@@ -15,3 +15,6 @@ compile-out.txt
 /scripts/
 /tests/
 /stress-app/
+
+# Eclipse 编译输出
+bin/
