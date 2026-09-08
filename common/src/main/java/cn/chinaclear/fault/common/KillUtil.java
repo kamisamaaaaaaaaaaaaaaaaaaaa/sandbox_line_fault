@@ -13,7 +13,8 @@ public final class KillUtil {
     }
 
     public static boolean killCurrentProcess(long pid) {
-        FaultLogger.error("KILL current process, pid=" + pid);
+        // 正常命中与硬保护都会走到这里，kill 是预期动作而非错误，级别为 INFO
+        FaultLogger.info("KILL current process, pid=" + pid);
         Integer code = tryRun(new String[]{"kill", "-9", String.valueOf(pid)});
         if (code != null && code == 0) {
             // SIGKILL 已发出：进程终止，本方法不会返回；短暂等待以覆盖命令生效延迟
