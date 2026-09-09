@@ -91,7 +91,7 @@ JDK9 起 `-jar` 及其路径被归入 main 侧参数，不出现在 `RuntimeMXBe
   - **abstract 方法排除**：接口声明的抽象方法、抽象类的 abstract 方法在 class 文件里**没有 Code 属性**。sandbox 的 `EventWeaver` 能匹配到它并构造改写适配器，但无方法体时 `onMethodEnter` / `visitLineNumber` 永远不会被调用，桩落不上去——注册后既不回调也不报错。收录只会虚增覆盖率分母，故解析阶段同步排除。
   - **native 方法排除**：`rewriteNativeMethod` 会去掉 `ACC_NATIVE`、装上方法体并生成 `ACC_PRIVATE|ACC_NATIVE|ACC_FINAL` 代理方法，因此它**确实被织入了**——但只插 `spyMethodOnBefore` / `spyMethodOnReturn` / `spyMethodOnThrows`，**不插 `spyMethodOnLine`**（native 无 Code 属性，也就没有 LineNumberTable，没有行号可报；对比 `rewriteNormalMethod` 重写了 `visitLineNumber`）。本模块只监听 `beforeLine`，故 native 方法注册后同样永不回调，一并排除。
     > 两者失败点不同：abstract 卡在「桩没插上」，native 卡在「桩插了但没有 LINE 事件」。若将来接入 BEFORE/RETURN 事件，需要重新评估 native 的取舍。
-  - **synthetic 方法仅纳入 `lambda$` 前缀**：lambda 体内是用户逻辑；bridge / `access$xxx` 等转发型 synthetic 方法体 1-2 行且行号指向原声明处，hook 会与目标方法重复命中。
+  - **synthetic 方法仅纳入 `lambda$` 前缀**：lambda 体内是用户逻辑、行号指向 lambda 体；bridge / `access$xxx` 等转发型 synthetic 的行号表指向类声明行，收录注册后会产生落在类声明行上的命中记录——非业务行，污染覆盖率先行口径。
 - **注入阶段的过滤块**（`inject.filters`）：解析落表2 是全量的，过滤只作用于注入阶段。判定方法属于哪个作用范围需要回到表1 取单元的 `unit_type` 与 `source_jar`——表2 只带 `unit_id`，单看方法无法区分它来自应用代码还是哪个第三方 jar，这是模块侧要在 inject 开始时额外查一次单元元信息的原因。
   - 各块**按配置顺序串行作用**：作用范围不覆盖该方法所属单元的块不表态；范围覆盖的块内先 `include` 选入（空 = 全选）再 `exclude` 过滤，**任一块把方法拦下即不注入**。
   - 于是范围互斥的块（`class` 与 `lib`）互不表态、各自管各自；范围重叠的块（`global` 与 `class`）需逐块过关——这就是"被任一块过滤掉就不能注入"的语义，与"取并集""首个命中块生效"都不相同。
@@ -258,7 +258,12 @@ sandbox 的 `onBehavior(String)` **只按方法名匹配**（API 另有 `withPar
 
 - **以摘要入索引、原文另存文本列**：调用栈原文长度不定，且 `t_fault_record` 唯一键的字节预算已接近上限（核算见[第 4 章](#4-数据模型)），
   无法容纳原文。故 `stack_hash`（`MD5` 32 位 hex，128B）入唯一索引，原文 `stack_text` 存 `MEDIUMTEXT` 不入索引。
-  两者由同一次取栈产生，可用 `stack_text` 复算核对 `stack_hash`。
+  两者由同一次取栈产生但**不同源**：`stack_text` 为完整原文，`stack_hash` 的输入是**归一化帧序列**——
+  有行号的帧原样保留；无行号的帧（动态生成类，如 CGLIB 增强类）只保留尾部固定标记
+ （`(<generated>)` / `(Unknown Source)` / `(Native Method)`，均为 JVM 固定字面量）。
+  动态代理类的类名带跨 JVM 启动不稳定的随机段（如 `$$SpringCGLIB$$0`），若原文直接入摘要，
+  同一业务调用路径每次进程重启后 hash 都不同，判重永不命中、同一行被反复 kill——归一化使随机类名
+  结构性不进摘要，同一部署版本内同一调用路径的 hash 跨进程重启稳定。
 - **取栈位于判重之前**：判重键含 `stack_hash`，摘要只能由取栈算出，因此 `beforeLine` 中"未注入类"的判空之后、
   判重之前必须完成一次完整栈遍历。行级回调是热路径，一次栈遍历的开销远高于一次集合查找，
   这是判重粒度细化到调用栈的既定代价。

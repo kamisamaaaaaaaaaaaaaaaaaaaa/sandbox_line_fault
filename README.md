@@ -570,7 +570,7 @@ INFO 覆盖各阶段里程碑与注入过程概况；WARN / ERROR 出现即需�
 | `<clinit>`（静态初始化）不注入 | sandbox 在类结构收集阶段即硬编码排除（无配置开关）；解析器同步排除，收录只会让表2 多出永不命中的行 |
 | abstract 方法不注入 | 接口声明的抽象方法与抽象类的 abstract 方法没有 Code 属性，桩无处可插，注册后永不回调；解析阶段即排除 |
 | native 方法不注入 | sandbox 虽会去掉 native 并生成代理方法完成织入，但只插 BEFORE/RETURN/THROWS、不插 LINE（native 无 Code 属性也就没有行号表），本模块只监听 `beforeLine`，故同样永不回调；解析阶段即排除 |
-| bridge / `access$xxx` synthetic 方法不注入 | 转发型 synthetic 方法体 1-2 行且行号指向原方法声明处，hook 会与目标方法重复命中；仅保留 `lambda$` 前缀 |
+| bridge / `access$xxx` synthetic 方法不注入 | 转发型 synthetic 的行号表指向类声明行，收录注册后会产生落在类声明行上的命中记录（非业务行，污染覆盖率先行口径）；仅保留 `lambda$` 前缀 |
 | lambda（`lambda$xxx`）会注入 | lambda 体内是用户逻辑；lambda 体被 javac 抽为原类的私有合成方法，有字节码有 LNT |
 | `$$Lambda$` 运行时壳类不注入 | JVM 现场生成的转发壳，无 LNT、名字带随机序号、无业务逻辑 |
 | JVM 入口 `main` 方法不注入 | sandbox 硬编码跳过（无配置开关）。这对 premain 模式是保护：main 在挂载完成后才执行，若可注入则首个进程会在 main 首行被 kill，应用永远无法启动 |

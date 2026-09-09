@@ -107,7 +107,7 @@ final class SandboxMountInvoker {
                                 + " lock=" + ATTACH_LOCK,
                         output, null, bootJarPath);
             }
-            // sandbox.sh 内部用 curl -N -s 发命令，不校验 HTTP 状态码：模块命令返回 5xx 时脚本仍 exit 0。
+            // sandbox.sh 内部用 curl -N -s 发命令，不校验 HTTP 状态码：模块命令返回 4xx/5xx 时脚本仍 exit 0。
             // 典型场景：模块 jar 在 /tmp 的副本被清理 → 模块报 config.yml not found → inject 实际失败，
             // 但进程"挂载成功"地继续运行、watch 根本没注册（永不注入，且无任何报错）。
             // 这属于"挂了却没覆盖"的绝不放行场景，必须硬保护。
@@ -116,6 +116,14 @@ final class SandboxMountInvoker {
                         "mount reported exit 0 but sandbox server returned an error page（watch 未注册，"
                                 + "典型原因：模块 jar 的 /tmp 副本被清理）",
                         output, null, bootJarPath);
+            }
+            // 观测性警告：同一版本 sandbox 下，成功挂载的 stdout 恒为空（core 日志走 logback 文件、
+            // inject 响应体为空）。输出非空且无错误页 = sandbox 行为发生变化（如环境变量注入的 JVM
+            // 警告、版本升级后的输出变化）——不构成失败（无错误页锚点），不改变保护语义，仅提示人工
+            // 关注上方记录的完整输出
+            if (!output.isEmpty()) {
+                FaultLogger.warn("sandbox.sh exit=0 with unexpected non-empty output (no error page marker)"
+                        + " —— sandbox behavior may have changed, inspect the output logged above");
             }
         } catch (IOException e) {
             throw HardProtectException.exception("MOUNT", "sandbox.sh exec failed: " + e.getMessage(),

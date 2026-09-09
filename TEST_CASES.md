@@ -436,6 +436,73 @@ IfaceImpl: <init> / apiAbstract
 > 默认构造器方法体只有 `super()` + `return`，而 sandbox 的织入刻意绕开 `super()`/`this()`
 > （`EventWeaver` 的 `isMethodEnter` 标记），其后再无行号事件，因此不会产生 `beforeLine` 回调。
 
+## 织入边界执行层实测（B 系列，2026-09-09）
+
+> 目标：把 DESIGN 3.3「织入边界」中各条目从读 sandbox 源码确认升级为**执行层实测**——验证期临时放开
+> `BootJarParser` 对 native / `<clinit>` / synthetic 的收录排除（标 VERIFICATION ONLY，验证后已恢复），
+> 让这些方法进表2 并注册 watch，实测 sandbox 对它们的真实行为；CGLIB 代理类另做通配实验注册
+>（`*EnhancerBySpringCGLIB*`，独立最小 listener 只打日志不写表3）实测排除行为。
+> 载荷：`test-lib/cn.chinaclear.fault.testlib.boundary` 场景类族（NativeCases 真实 so
+> `nativeSum`、StaticInitCases 静态块、Box 桥接、OuterWithInner access$000、PlainCtor 构造器、
+> BigMethodCases 8000 行超大方法 code=48041B）+ test-app 侧 ProxyTargetService（BoundaryAspect
+> 切面触发 CGLIB）+ startupRunner 触发链（`[boundary]` 标记日志）。
+> 执行：测试机 192.168.193.129，kill→restart 循环（tag=b1-exec2 全量口径 80 轮 → tag=b1-exec3
+> 限定名单 69+ 轮），以 t_fault_record 命中记录对照"触发清单 vs 命中清单"。
+
+| # | 场景 | 注册（注入目标） | 实测结果 | 结论 |
+| --- | --- | --- | --- | --- |
+| B1 | native（真实 so） | `NativeCases.nativeSum(J)J`（验证期放开收录） | so 正常调用返回（返回值 3 佐证）；表3 零 `nativeSum` 记录；调用它的 `callNative` 各行正常命中 | ✅ `rewriteNativeMethod` 只插 BEFORE/RETURN/THROWS 无 LINE 桩，beforeLine 永不回调——DESIGN 3.3.1 实证成立 |
+| B2 | `<clinit>` | `StaticInitCases.<clinit>`（验证期放开收录） | 静态块执行过（`[boundary] <clinit> executing`）；表3 零 `<clinit>` 记录；同类 `read()` 正常命中 | ✅ sandbox 类结构收集阶段（ClassStructureImplByAsm）硬编码排除，实证成立 |
+| B3 | bridge | `Box.compareTo(Object)`（验证期放开收录） | **有命中**：`Box.compareTo line=15`（类声明行）；原始 `compareTo(Box)` 命中业务行 26/27 | ⚠️ 桥接被织入并产生行事件，但行号指向**类声明行**——不是与目标方法同行的"重复命中"（修正 DESIGN 旧表述），而是产生语义无意义的声明行垃圾记录 |
+| B4 | access$ | `OuterWithInner.access$000`（验证期放开收录） | **有命中**：`access$000 line=14`（类声明行）；`Inner.read`/`readViaInner` 业务行正常命中 | ⚠️ 同 B3：转发型 synthetic 产生声明行垃圾记录，收录只会污染覆盖率先行口径 |
+| B5 | 64KB 方法体 | `BigMethodCases.bigMethod(J)J` + 同类对照 `smallMethod(J)J` | 两个方法都执行了（标记日志 23+ 次），表3 **零** `BigMethodCases` 记录 | ✅ 织入超限 → 整类回退原始字节码：**同类正常小方法一并静默**，"整类回退"实证成立 |
+| B6 | CGLIB 主验证 | `ProxyTargetService.proxiedCall`（默认收录） | 调用经代理壳（`$$EnhancerBySpringCGLIB$$`），命中落**原始类**业务行 21~25；代理壳类零记录 | ✅ 织入目标是表2 里的原始类（代理类运行时生成不在表2），业务行字节码在原始类执行——命中归原始类 |
+| B7 | CGLIB 实验项 | 通配 watch `*EnhancerBySpringCGLIB*`（module 侧 inject 后追加，VERIFICATION ONLY） | watch 注册成功（日志确认），代理方法被调用多次，`CGLIB PROXY LINE EVENT` **0 条** | ✅ sandbox `UnsupportedMatcher` 对代理类"注册得上、织不进"实证成立 |
+| B8 | main | `TestApplication.main`（默认收录） | 启动即执行，表3 零 `main` 记录 | ✅ `UnsupportedMatcher.isJavaMainBehavior` 排除实证成立 |
+| B9 | lambda 回归 | `lambda$runBoundaryChain$*` | 各 lambda 体行正常命中 | ✅ 既有结论回归通过 |
+
+### B 系列的两个重要发现
+
+| 发现 | 现象 | 影响 | 状态 |
+| **CGLIB 调用链污染 stackHash → 集群判重失效** | 经 CGLIB 代理调用的方法命中时，调用栈含 `$$EnhancerBySpringCGLIB$$<随机hash>` 帧（如 `TestApplication$$EnhancerBySpringCGLIB$$dd42bfff.<init>`、切面 `logEntry` 的调用链），stackHash 每轮进程都不同 → 判重键永不重复 → 同一行被反复插入表3、反复 kill（实测 `BoundaryAspect.logEntry line=17` 94 条记录、`proxiedCall line=21` 29 条） | **真实缺陷**：任何被 CGLIB 代理的 bean（@Configuration/@Transactional/@Async/切面 bean）的命中判重都会失效，restart 循环永不收敛 | **已修复并回归**（G 系列）：`stack_hash` 改为对归一化帧序列取 MD5——有行号帧原样、无行号帧只取尾部固定标记，随机类名结构性不进摘要 |
+| **module config.yml 模板 `inject:` 顶层键 + 子键全注释 = 启动即硬保护** | `inject:` 键存在但子键全注释 → YAML 解析为 null → S 系列"写了键却没值"硬保护在 mount 阶段拦截（错误页：`config "inject" is present but has no value`） | 模板已修复（`inject:` 整段注释，附说明）。S 系列留空硬保护在此意外场景下正确拦住了配置错误的进程 |
+
+### 验证版改动还原记录
+
+- `BootJarParser`：三处排除已恢复（native/`<clinit>`/synthetic），注释按 B 系列实测结论修正表述（B3/B4：声明行垃圾记录，非同行重复命中）
+- `FaultKillModule`：CGLIB 通配实验注册已移除
+- agent `config.yml`：`lib.whitelist` 恢复注释态（默认空）；module `config.yml`：`inject.filters` 恢复注释态（全量注入）
+- 保留：test-lib boundary 场景类族、test-app 触发链与 ProxyTargetService/BoundaryAspect（`proxyBeanMethods=false`）、`scripts/native/`、`scripts/gen-big-method.ps1`——作为后续回归载荷
+- 部署机（192.168.193.129）已恢复正式版 `fault-agent-1.0.0.jar` 与 `fault-module-1.0.0.jar`；验证数据保留在表3（tag=b1-exec1/2/3）与 `/home/lys/b1-logs/`
+
+## 调用栈摘要归一化（G 系列，2026-09-09）
+
+> 修复 B 系列发现①：CGLIB 调用链随机类名污染 `stack_hash` → 判重失效、同行反复 kill、restart 循环永不收敛。
+> 方案（用户定稿）：`stack_hash` 的输入改为**归一化帧序列**——有行号的帧原样保留（带随机类名的帧全部无行号，
+> 生产栈实证）；无行号的帧只保留尾部固定标记 `(<generated>)` / `(Unknown Source)` / `(Native Method)`
+> （JVM 固定字面量）。不解析、不枚举任何生成类命名，随机段结构性排除。
+> `stack_text` 仍为完整原文；表结构与判重键组成不变。实现：`fault-module/.../CallStack.java`。
+
+| # | 内容 | 预期 | 结果 |
+| --- | --- | --- | --- |
+| G1 | CGLIB 场景收敛（核心）：`ProxyTargetService.proxiedCall` 经代理调用，各业务行命中 | 每行每调用栈各 1 次，之后判重放行、进程继续 | ✅ 通过（tag=b1-exec7：line=21~25 **各 1 条**，对比修复前 29/22/16/10/4 条；`cglib result` 场景跑通） |
+| G2 | 全链路收敛性：boundary 载荷各场景 | 全部命中行 1 条，无异常重复 | ✅ 通过（exec7 全表 `cnt=1`：Box/viaBridge/compareTo、OuterWithInner/readViaInner、NativeCases/callNative、StaticInitCases/read、PlainCtor 各 1 条） |
+| G3 | 中间态佐证：修复后全量注入下推进（tag=b1-exec4，177 轮） | 无单行异常重复；多栈场景每栈 1 条 | ✅ 通过（最高单行 9 条 = 9 种调用栈各 1 条，属正确多栈语义） |
+| G4 | 兼容性：hash 算法变更不迁移历史数据 | 同 tag 内等值匹配，表结构零变更 | ✅ 通过；正式版已重打并上传部署机 |
+
+> 归一化规则的依据（生产栈实证，Spring 6 / Boot 3）：带随机类名的帧全部是 `(<generated>)`——
+> 包括 `BatchAutoConfiguration$$SpringCGLIB$$0.CGLIB$dataSourceManager$10(<generated>)` 与
+> `...$$SpringCGLIB$$FastClass$$1.invoke(<generated>)`；有行号的帧类名全部干净（原始类、JDK 类、
+> lambda 合成方法 `lambda$xxx$N`——编译期编号，同部署版本内跨 JVM 稳定，跨版本由判重键中
+> `boot_jar_hash` 天然隔离）。
+
+### G 系列踩到的两个配置坑（已记入 config.yml 注释）
+
+| 坑 | 现象 | 说明 |
+| --- | --- | --- |
+| `filters:` 写在注释掉的 `# inject:` 块下 | 变成**顶层** `filters` 键，`inject.filters` 读不到 → 名单静默失效、按全量注入跑 | 必须挂在未注释的 `inject:` 键下（b1-exec3/exec4 因此白跑全量，exec5 修正暴露） |
+| `include` 正则不带 `.*` 后缀 | `...ProxyTargetService` 全串匹配不了 `...ProxyTargetService.proxiedCall` → 该类整体 skip → 零注册 → 零覆盖硬保护 | 方法键是「完全限定类名.方法名」，正则需 `...\..*` |
+
 **执行方式**（目标机在线后）：
 
 ```bash

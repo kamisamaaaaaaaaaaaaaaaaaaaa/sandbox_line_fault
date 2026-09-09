@@ -137,27 +137,32 @@ public final class BootJarParser {
                 @Override
                 public MethodVisitor visitMethod(int access, String name, String desc,
                                                  String signature, String[] exceptions) {
-                    boolean synthetic = (access & Opcodes.ACC_SYNTHETIC) != 0;
-                    boolean isLambda = synthetic && name.startsWith("lambda$");
-                    // <clinit> 不入库：sandbox 在类结构收集阶段即硬编码排除它
+                    // <clinit> 排除（B 系列实测）：sandbox 在类结构收集阶段即硬编码排除它
                     //（ClassStructureImplByAsm$5$1.visitMethod：StringUtils.equals("<clinit>", name) 直接放行、
-                    // 不收集为 BehaviorStructure）→ 它进不了 signCodes，织入器永不改写。
-                    // 收录它只会让表2 多出一批永不命中的行，制造覆盖率盲区（已实测确认）。
+                    // 不收集为 BehaviorStructure）→ 它进不了 signCodes，织入器永不改写。验证期收录注册后
+                    // 静态块执行过但零命中，收录只会让表2 多出一批永不命中的行，制造覆盖率盲区。
                     if ("<clinit>".equals(name)) {
                         return null;
                     }
-                    if (synthetic && !isLambda) {
+                    // synthetic 排除（B 系列实测）：仅保留 lambda（lambda$ 前缀，体内为用户逻辑、行号指向
+                    // lambda 体，正常命中）。其余 synthetic（bridge/access$ 转发）收录注册后确实被织入，
+                    // 但其 LNT 行号指向类声明行——命中记录落在类声明行上，是语义无意义的垃圾行
+                    //（不是与目标方法同行重复，修正早先"重复命中"的表述），排除。
+                    boolean isLambda = name.startsWith("lambda$") && (access & Opcodes.ACC_SYNTHETIC) != 0;
+                    if ((access & Opcodes.ACC_SYNTHETIC) != 0 && !isLambda) {
                         return null;
                     }
-                    // abstract 方法：class 文件里没有 Code 属性。sandbox 的织入器能匹配到它
-                    //（signCodes 命中），但没有方法体可插桩，注册后永不产生回调。
-                    // native 方法：sandbox 的 rewriteNativeMethod 会去掉 native 并生成代理方法，
-                    // 确实完成了织入，但只插 spyMethodOnBefore / spyMethodOnReturn / spyMethodOnThrows，
-                    // 不插 spyMethodOnLine——native 无 Code 属性也就没有 LineNumberTable，无行号可报
-                    //（对比 rewriteNormalMethod 重写了 visitLineNumber）。本模块只监听 beforeLine，
-                    // 故 native 注册后同样永不回调。
-                    // 两者收录都只会让表2 多出一批永不命中的行，虚增覆盖率分母。
-                    if ((access & Opcodes.ACC_ABSTRACT) != 0 || (access & Opcodes.ACC_NATIVE) != 0) {
+                    // abstract 排除：class 文件里没有 Code 属性。织入器能匹配到它（signCodes 命中），
+                    // 但没有方法体可插桩，注册后永不产生回调。
+                    if ((access & Opcodes.ACC_ABSTRACT) != 0) {
+                        return null;
+                    }
+                    // native 排除（B 系列实测，真实 so 调用）：sandbox 的 rewriteNativeMethod 会去掉
+                    // native 并生成代理方法，确实完成了织入，但只插 spyMethodOnBefore /
+                    // spyMethodOnReturn / spyMethodOnThrows，不插 spyMethodOnLine——native 无 Code 属性
+                    // 也就没有 LineNumberTable，无行号可报。本模块只监听 beforeLine，注册后永不回调
+                    //（验证期收录注册，so 正常调用返回但零命中）。
+                    if ((access & Opcodes.ACC_NATIVE) != 0) {
                         return null;
                     }
                     // 描述符完整入库（TEXT 列，不入索引）；区分重载由 descHash 承担。
