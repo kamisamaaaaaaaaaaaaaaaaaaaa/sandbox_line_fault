@@ -56,6 +56,19 @@ jdbc:
   #     include:
   #       - 'com\.newclear\..*'
 
+# thread:
+#   # 线程名过滤（运行期）：正则对线程名全串匹配，一行一个；先 include 选入（空 = 全选）
+#   # 再 exclude 排除。不通过的线程执行到注入行时静默放行——不写表3、不 kill、不打日志；
+#   # 过滤是运行期行为，不影响解析收录与注册数，也不会触发零覆盖硬保护。
+#   # 用途：排除名字不稳定的噪音线程（监控/心跳/定时任务等）。
+#   # 不配置（整段注释）= 全部线程参与故障。
+#   # include:
+#   #   - 'main'
+#   #   - 'business-.*'
+#   # exclude:
+#   #   - 'monitor-.*'
+#   #   - 'scheduling-.*'
+
 # log:
 #   # 模块日志目录（相对路径基于目标进程工作目录，与 agent 的 log.dir 互不影响）
 #   # 默认值：logs
@@ -63,3 +76,5 @@ jdbc:
 #   # 日志级别阈值：DEBUG / INFO / WARN / ERROR（忽略大小写），低于阈值的日志不输出。
 #   # 默认值：INFO（故障命中 FAULT HIT 为 INFO 永远输出；多节点抢空的 already preempted 为 DEBUG 静默）
 #   level: INFO
+
+

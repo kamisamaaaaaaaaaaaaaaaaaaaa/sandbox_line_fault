@@ -1,6 +1,7 @@
 package cn.chinaclear.fault.common;
 
 import cn.chinaclear.fault.common.model.InjectFilter;
+import cn.chinaclear.fault.common.model.ThreadFilter;
 import org.yaml.snakeyaml.Yaml;
 
 import java.io.IOException;
@@ -255,6 +256,15 @@ public final class FaultConfig {
             out.add(new InjectFilter(scope, libs, include, exclude, i));
         }
         return out;
+    }
+
+    /**
+     * 线程名过滤：include 选入（空 = 全选）、exclude 排除，正则对线程名全串匹配。
+     * 未配置（thread: 段整段注释）= 全部线程参与故障。正则非法立即抛异常，
+     * 由调用方上层转硬保护。
+     */
+    public ThreadFilter threadFilter() {
+        return new ThreadFilter(getList("thread.include"), getList("thread.exclude"));
     }
 
     /** 日志目录（相对路径基于目标进程工作目录） */

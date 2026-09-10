@@ -13,6 +13,7 @@ import cn.chinaclear.fault.common.model.ClassMethodInfo;
 import cn.chinaclear.fault.common.model.ErrorRecord;
 import cn.chinaclear.fault.common.model.InjectFilter;
 import cn.chinaclear.fault.common.model.JarRecord;
+import cn.chinaclear.fault.common.model.ThreadFilter;
 import com.alibaba.jvm.sandbox.api.Information;
 import com.alibaba.jvm.sandbox.api.Module;
 import com.alibaba.jvm.sandbox.api.annotation.Command;
@@ -80,6 +81,12 @@ public class FaultKillModule implements Module {
             FaultLogger.info("filters: " + (filters.isEmpty()
                     ? "none (all parsed methods are injection candidates)"
                     : filters.size() + " block(s), applied in order -> " + filters));
+            // 线程名过滤：配置非法（正则非法）在构造时抛出，由本方法外层 catch 落表4 后 kill。
+            // 运行期判定发生在 listener.beforeLine 取栈之前，不通过的线程静默放行
+            final ThreadFilter threadFilter = config.threadFilter();
+            FaultLogger.info("thread filter: " + (threadFilter.enabled()
+                    ? threadFilter + " (non-passing threads are silently released)"
+                    : "none (all threads participate)"));
 
             JdbcHelper db = new JdbcHelper(config.jdbcUrl(), config.jdbcUsername(), config.jdbcPassword(),
                     config.jdbcDriver());
@@ -130,10 +137,10 @@ public class FaultKillModule implements Module {
                     }
                     classToUnitId.put(m.getClassName(), m.getUnitId());
                 }
-                // 每批一个 listener（只持本批映射，随批次释放）
+                // 每批一个 listener（只持本批映射，随批次释放）；threadFilter 各批共享同一实例
                 KillAdviceListener listener =
                         new KillAdviceListener(faultRecordDao, errorRecordDao, classToUnitId, pid, tag,
-                                bootJar, bootJarHash, config.faultTimes());
+                                bootJar, bootJarHash, config.faultTimes(), threadFilter);
                 // 每批独立的结果对象：仅两个计数器，不持有类名等集合（类数多时避免常驻内存）
                 RegisterStat batchStat = new RegisterStat();
                 registerBatch(classMethods, classToUnitId, listener, errorRecordDao, unitIds,

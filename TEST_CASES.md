@@ -475,6 +475,27 @@ IfaceImpl: <init> / apiAbstract
 - 保留：test-lib boundary 场景类族、test-app 触发链与 ProxyTargetService/BoundaryAspect（`proxyBeanMethods=false`）、`scripts/native/`、`scripts/gen-big-method.ps1`——作为后续回归载荷
 - 部署机（192.168.193.129）已恢复正式版 `fault-agent-1.0.0.jar` 与 `fault-module-1.0.0.jar`；验证数据保留在表3（tag=b1-exec1/2/3）与 `/home/lys/b1-logs/`
 
+## 线程名过滤（T 系列，2026-09-10）
+
+> module 侧新增运行期线程名过滤：`thread.include` / `thread.exclude`（正则对线程名全串匹配，
+> 一行一个），先 include 选入（空 = 全选）再 exclude 排除。不通过的线程执行到注入行时
+> **静默放行**——不写表3、不 kill、不打日志；过滤是运行期行为，不影响解析收录与注册数，
+> 不参与零覆盖判定。判定位于 `beforeLine` 取栈之前（被过滤线程连取栈开销都省掉），
+> 每次回调直接对预编译 Pattern 匹配、**不做结果缓存**（线程名可被运行时 `setName` 修改，
+> 缓存会陈旧失真）。定位：排除名字不稳定的噪音线程（监控/心跳/定时任务）。
+> 载荷：test-app 触发链新增显式命名噪音线程 `fault-noise-worker`，执行与主线程相同的
+> 注入名单内方法 `ProxyTargetService.proxiedCall`。
+
+| # | 配置 | 预期 | 结果 |
+| --- | --- | --- | --- |
+| T1 | `thread.exclude: ['fault-noise-.*']` | 噪音线程执行 proxiedCall 但不命中；主线程正常命中 | ✅ 通过（tag=t1b：表3 仅 `thread_name=main` 5 条；日志 `thread filter: include=0 exclude=1`，噪音线程场景执行过 1 次零命中） |
+| T2 | `thread.include: ['main']` | 同上 | ✅ 通过（tag=t2：`include=1 exclude=0`；main 5 条、噪音线程零命中） |
+| T3 | **不配置 thread 段（对照组）** | 噪音线程同样命中（证明 T1/T2 的零命中确实来自过滤，而非载荷没执行到） | ✅ 通过（tag=t3：`thread filter: none (all threads participate)`；**main 5 + fault-noise-worker 5**，每行每线程各 1 次） |
+| T4 | `thread.include: ['[']`（非法正则） | 挂载阶段硬保护：落表4 后 kill，错误消息定位到配置项 | ✅ 通过（tag=t4：`invalid thread.include regex（第 0 条)"[": Unclosed character class near index 0`，每轮 exit=137） |
+
+> T3 是对照组的意义：T1/T2 若只看"噪音线程零命中"无法区分"被过滤"与"该线程压根没执行到注入行"，
+> T3 证明同一载荷在不过滤时噪音线程确实会产生 5 条命中，反向确认过滤生效。
+
 ## 调用栈摘要归一化（G 系列，2026-09-09）
 
 > 修复 B 系列发现①：CGLIB 调用链随机类名污染 `stack_hash` → 判重失效、同行反复 kill、restart 循环永不收敛。

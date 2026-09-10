@@ -7,6 +7,7 @@ import cn.chinaclear.fault.common.dao.ErrorRecordDao;
 import cn.chinaclear.fault.common.dao.FaultRecordDao;
 import cn.chinaclear.fault.common.model.ErrorRecord;
 import cn.chinaclear.fault.common.model.FaultRecord;
+import cn.chinaclear.fault.common.model.ThreadFilter;
 import com.alibaba.jvm.sandbox.api.listener.ext.Advice;
 import com.alibaba.jvm.sandbox.api.listener.ext.AdviceListener;
 import com.alibaba.jvm.sandbox.api.listener.ext.Behavior;
@@ -48,10 +49,13 @@ final class KillAdviceListener extends AdviceListener {
     private final Set<String> exhausted = ConcurrentHashMap.newKeySet();
     /** 每行每线程故障次数上限（配置 inject.fault.times） */
     private final int faultTimes;
+    /** 线程名过滤（运行期）：不通过的线程静默放行；未配置时 enabled()=false，判定短路跳过 */
+    private final ThreadFilter threadFilter;
 
     KillAdviceListener(FaultRecordDao faultRecordDao, ErrorRecordDao errorRecordDao,
                        Map<String, Long> classToUnitId, long pid, String tag,
-                       String bootJar, String bootJarHash, int faultTimes) {
+                       String bootJar, String bootJarHash, int faultTimes,
+                       ThreadFilter threadFilter) {
         this.faultRecordDao = faultRecordDao;
         this.errorRecordDao = errorRecordDao;
         this.classToUnitId = classToUnitId;
@@ -60,6 +64,7 @@ final class KillAdviceListener extends AdviceListener {
         this.bootJar = bootJar;
         this.bootJarHash = bootJarHash;
         this.faultTimes = faultTimes;
+        this.threadFilter = threadFilter;
     }
 
     @Override
@@ -74,6 +79,13 @@ final class KillAdviceListener extends AdviceListener {
             }
             final String method = behavior.getName();
             final String threadName = Thread.currentThread().getName();
+            // 线程名过滤（运行期）：噪音线程（监控/心跳/定时任务等名字不稳定的线程）静默放行，
+            // 不写表3、不 kill。判定位于取栈之前，被过滤的线程连取栈开销都省掉；
+            // 每次回调直接对预编译 Pattern 匹配、不做结果缓存（线程名可被运行时修改 setName，
+            // 缓存会让判定陈旧失真）。静默放行不打日志，避免热路径日志膨胀。
+            if (threadFilter.enabled() && !threadFilter.passes(threadName)) {
+                return;
+            }
             // 判重键含调用栈摘要，摘要只能由取栈算出，故取栈位于快速返回之前。
             // 行级回调是热路径，一次完整栈遍历的开销远高于一次集合查找，
             // 这是判重粒度细化到调用栈的既定代价。
