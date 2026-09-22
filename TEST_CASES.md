@@ -713,3 +713,64 @@ javac 会把 finally 的代码**复制**到正常路径与异常路径各一份�
   远程临时脚本、`/home/lys/lc-cov`、`/tmp/lclnt` 等临时目录已删除；无残留 java/watchdog 进程；`test-app.jar` 本轮未改动。
 - 数据保留：表3 中 `tag=lc-cov1` 的记录（含前期 Tomcat 线程部分）保留备查，统计时已按 `thread_name='main'` 过滤。
 
+## 特殊情况行号口径与可命中性（L10 / L11，2026-09-22）
+
+> 目的：回答「agent 解析出的 `code_lines` 行集合是否符合预期」与「sandbox 故障能否真正挂上这些行」。
+> 载荷：**自制 mini bootJar**（`special-cases.jar`）——样例类放 `BOOT-INF/classes/`，复用 `test-app.jar` 内的
+> `org/springframework/boot/loader/*`（MANIFEST：`Main-Class=JarLauncher` / `Start-Class=lcsample.SpecialMain`），
+> 样例覆盖全部特殊语法结构；**不动 test-app.jar**。jar sha256 在解析与 javap 两侧核对一致（`30fb47f1…`）。
+> 流程：先 parse-only 验证解析口径（L10），再注入 `lcsample.*` + `thread.include: ['main']`，
+> 3 实例并行 watchdog 推进（tag=`lc-sc1`，约 3 分钟收敛）验证命中（L11）。
+
+### L10 解析口径（unitId=2038，3 类 23 方法 / 92 行）
+
+逐方法基数校验：javap 去重行数 == 表2 `code_lines`，**23/23 全部一致，总和 92 = 92**。静态行集合逐条核对：
+
+| 方法（SpecialCases 除非注明） | 静态行 | 核对点 |
+| --- | --- | --- |
+| `commentsAndBlanks` | 13, 17, 18 | 单行注释 12、空行 14、块注释 15-16 **均不含** |
+| `branch` | 22, 23, 24, 25, 27 | `} else {`（26）**不含**；`else if`（24）**含** |
+| `elseOnOwnLine` | 32, 34, 38 | 单独 `{`/`}`/`else`（33/35/36/37/39）**全不含** |
+| `catchPath` | 44, 45, 47, 48, 49 | `try {`（43）**不含**；`} catch` 行（48）**含**（handler 入口 `astore`） |
+| `finallyOnly` | 55, 56, 58, 60, **61**, **62** | try/finally 结构尾 `}`（61）**含**（合成 `goto`/`athrow`）；方法尾 `}`（62）含（隐式 return） |
+| `allThree` | 66, 67, 69, 70, 71, 73, **74** | 结构尾 `}`（74）含；有显式 return → 方法尾 `}`（75）**不含** |
+| `explicitReturn` / `implicitReturn` | 78, 79 / 83, **84** | 显式 return → 方法尾 `}` 不含；隐式 → 含 |
+| `bareReturn` | 87, **88**, 90, **91** | 裸 `return;`（88）含；`}`（89）不含；方法尾 `}`（91）含（隐式 return） |
+| `sameLineTwice` | 94, 95 | 一行三条语句只算 1 行 |
+| `chainedLines` | 99, 100, 101, 102 | 链式调用折行，每行都有 |
+| `multiLineStatement` | 106, **109** | **跨行语句只标起始行**，续行 107/108 不含（新发现） |
+| `switchCase` | 113, 115, 117, 119 | **`case 1:` 等标签行（114/116/118）不含**，只有 case 内语句行含（新发现） |
+| `loop` | 124, 125, 126, 128 | for 行含，块尾 `}`（127）不含 |
+| `lambdaBody` / `lambda$lambdaBody$0` | 132, 133 / 132 | lambda 体是独立合成方法 |
+| `ternary` / `neverCalled` | 137 / 143 | 三元表达式算一行 |
+| `SpecialCases.<init>` | 7, 8, 9 | 7 行 = 隐式 `super()`（静态含，能否命中见 L11） |
+| `nativeOp` / `SpecialAbstract.abstractOp` | **不在表2** | native / abstract 解析阶段即排除 |
+| `SpecialMain.main` | 5..32 共 28 行 | 静态含（能否命中见 L11） |
+
+### L11 可命中性（tag=lc-sc1）
+
+- 结果：命中 71 条记录 / **58 个不同行**；**`命中集合 ⊆ 静态集合`（0 条集合外命中）**；覆盖率 **58 / 92 = 63.0%**。
+- 差集 34 行，**逐条归因且与预期完全一致，无异常项**：
+
+| 类别 | 行数 | 明细 |
+| --- | --- | --- |
+| java `main` 被 sandbox 硬编码排除 | 28 | `SpecialMain.main` 全部（5-32） |
+| 构造器首行（隐式 `super()`） | 3 | `SpecialCases.<init>\|7`、`SpecialMain.<init>\|3`、`SpecialAbstract.<init>\|3` |
+| 方法未被调用 | 2 | `neverCalled\|143`、`SpecialAbstract.concreteOp\|7`（main 未调用 SpecialAbstract） |
+| 合成 `athrow` 不可达 | 1 | `allThree\|74`：try/catch/finally 尾 `}` 的 `athrow` 只在 catch 之后再抛异常才走，而 catch 已捕获全部异常 → 不可达 |
+
+- **对照样例**：`finallyOnly` **6/6 全命中**——`finallyOnly(true)` 构造异常 → 异常路径的 finally 副本（60）→
+  **合成 `athrow`（61）** → 异常传播到 main 被 catch。证明「try/finally 尾 `}` 上的合成 `athrow` 确实能挂上故障」。
+- 其余全部方法（branch / elseOnOwnLine / catchPath / chainedLines / loop / switchCase / lambda 等）**行级全覆盖**。
+
+### 结论
+
+- 解析口径：静态行集合与 `code_lines` 完全一致（逐方法基数 + 逐行），`code_lines` 可安全用作覆盖率分母。
+- 命中：`命中 ⊆ 静态` 成立；未命中的每一行都能归因到四类已知机制（sandbox 排除 java main、`super()` 行、未被调用、不可达路径），
+  **不存在"解析有行号但 sandbox 挂不上且无法解释"的行**。
+- 三重校验方法（后续复用）：① 逐方法基数（javap 去重行数 == code_lines）② 子集（命中 ⊆ 静态）③ 同源（解析与 javap 用同一 jar，sha256 核对）。
+
+### 还原
+
+agent / module 内 `config.yml` 均从备份还原为仓库默认版；`special-cases.jar`、样例源码目录、watchdog 目录、临时脚本已删除；无残留 java 进程。
+
