@@ -673,6 +673,27 @@ SELECT CONCAT(class_name,'|',method_name,'|',code_lines) FROM t_class_method WHE
 | 普通块结尾 `}` | 通常**没有** | 无指令生成 |
 | 注释 / 空行 / 单独 `{` | **没有** | 无指令生成。L4 的 `CommentSample.compute` 实测只有 16/20/22/24/29/32 六行，注释、空行、单独 `{`、`}`、`else` 全部不在内 |
 
+### 附 2：try/finally 的合成出口（实证）
+
+javac 会把 finally 的代码**复制**到正常路径与异常路径各一份，并在结构末尾合成 `goto`（跳过 handler）与 `athrow`（异常路径重新抛出）。
+实测样例（`/tmp/lcfin`，`javac -g`，行号见下）：`5 plainFinally(){ / 6 try{ / 7 body / 8 }finally{ / 9 finally / 10 } / 11 }`，
+`13 returnInTry(){ / 14 try{ / 15 return 1 / 16 }finally{ / 17 finally / 18 } / 19 }`，
+`21 returnAfterTry(){ / 22 try{ / 23 body / 24 }finally{ / 25 finally / 26 } / 27 return 2 / 28 }`。
+
+| 方法 | LineNumberTable（行:pc） | 去重行 | 说明 |
+| --- | --- | --- | --- |
+| `plainFinally()`（void，无显式 return） | `7:0, 9:8, 10:16, 9:19, 10:28, 11:30` | 7, 9, 10, 11 | finally 两份副本都标 **9**；合成的 `goto`(pc16) 与异常路径 `athrow`(pc29) 都标在 **10**（finally 块结尾 `}` 行）；隐式 `return`(pc30) 标在 **11**（方法尾 `}`） |
+| `returnInTry()`（try 内 `return 1`） | `15:0, 17:2, 15:10, 17:12, 18:21` | 15, 17, 18 | `ireturn` 标在 **15**（return 语句行），方法尾 `}`（19）**不计入**；异常路径 `athrow` 标在 **18**（结尾 `}`） |
+| `returnAfterTry()`（finally 后 `return 2`） | `23:0, 25:8, 26:16, 25:19, 26:28, 27:30` | 23, 25, 26, 27 | 同上：`goto`/`athrow` 落在 **26**，方法尾 `}`（28）**不计入** |
+
+结论：
+
+- finally 的字节码被复制两份，但**行号都指向 finally 块内同一源码行** → 去重后**不会**因复制而虚增行数。
+- 编译器合成的出口（`goto` 与异常路径的 `athrow`）落在 **try/finally 结构的结尾 `}` 行** → 该行**会**进入统计，
+  即使运行期从未发生异常（这行能否命中取决于是否真走到异常路径的 `athrow`）。
+- 方法尾 `}` 仍遵循上一节的规则：**有显式 return → 不计入；无显式 return（隐式 return）→ 计入**。
+- 顺带确认：`try {` 行（6/14/22）与 `} finally {` 行（8/16/24）**均无条目**（finally 内首条指令落在 9/17/25）。
+
 两个易混淆点：
 
 - **同一行号可出现多次**：`printIsolationCheck` 的 81 行同时对应 pc 42 与 pc 70（中间插了别的行的指令），
