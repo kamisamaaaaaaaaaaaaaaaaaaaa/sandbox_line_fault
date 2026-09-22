@@ -37,6 +37,10 @@ CREATE TABLE IF NOT EXISTS t_class_method (
   method_name  VARCHAR(128) NOT NULL,
   method_desc  TEXT         NOT NULL COMMENT 'ASM 描述符完整原文（仅观测，不入索引）',
   desc_hash    CHAR(16)     NOT NULL COMMENT '描述符的 MD5 前 16 位 hex（区分重载，索引键）',
+  -- 有效代码行数：该方法 LineNumberTable 中不同行号的个数。注释行/空行没有字节码，天然不计入；
+  -- 纯 '}'、单独 else 之类无字节码的行同样不计入（同 JaCoCo 口径）。
+  -- 不参与判重、不入索引（纯观测）；NULL = 该 class 未编译行号信息（如 -g:none），与「真的 0 行」区分
+  code_lines   INT          NULL COMMENT '方法有效代码行数：LineNumberTable 去重行号数（天然排除注释行/空行/无字节码的括号行）；NULL=未编译行号信息（如 -g:none）',
   UNIQUE KEY uk_method (unit_id, class_name, method_name, desc_hash)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
@@ -63,6 +67,17 @@ CREATE TABLE IF NOT EXISTS t_fault_record (
   occurred_at   DATETIME     NOT NULL,
   UNIQUE KEY uk_hit_node (tag, boot_jar_hash, class_name, method_name, line_no, thread_name, fault_seq, stack_hash)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- =====================================================================
+-- 已有库升级 3：t_class_method 增加方法有效代码行数
+-- 适用场景：本文件此前已执行过、t_class_method 已存在且已有数据的库。
+-- 存量行 code_lines 统一为 NULL（表示「未采集」，与「真的 0 行」区分）——本列纯观测、
+-- 不入唯一键，追加不影响任何判重逻辑，也不会与存量数据冲突。执行前建议备份该表。
+-- 注意：已有单元（status=completed）不会重解析，存量行的 code_lines 不会被回填；
+--       需要全量带行数的数据时，清空 t_class_method 并把 t_jar_record 置 pending 触发重解析。
+-- =====================================================================
+-- ALTER TABLE t_class_method
+--   ADD COLUMN code_lines INT NULL COMMENT '方法有效代码行数：LineNumberTable 去重行号数（天然排除注释行/空行/无字节码的括号行）；NULL=未编译行号信息（如 -g:none）' AFTER desc_hash;
 
 -- =====================================================================
 -- 已有库升级 2：t_class_method 描述符列扩容并改用摘要判重

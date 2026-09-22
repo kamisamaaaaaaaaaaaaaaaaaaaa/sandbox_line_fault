@@ -31,8 +31,8 @@ public final class SchemaInitializer {
             ResultSet rs = st.executeQuery(
                     "SELECT fault_seq, method_desc, stack_hash, stack_text FROM t_fault_record LIMIT 1");
             rs.close();
-            // 表2 的 desc_hash 为解析落库必需列（旧表未升级时 INSERT 直接 Unknown column）
-            rs = st.executeQuery("SELECT method_desc, desc_hash FROM t_class_method LIMIT 1");
+            // 表2 的 desc_hash / code_lines 为解析落库必需列（旧表未升级时 INSERT 直接 Unknown column）
+            rs = st.executeQuery("SELECT method_desc, desc_hash, code_lines FROM t_class_method LIMIT 1");
             rs.close();
         } catch (SQLException e) {
             throw new IllegalStateException(

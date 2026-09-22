@@ -547,3 +547,48 @@ GROUP BY class_name, method_name ORDER BY class_name, method_name;
 > `scope: global` + `include: ['cn\.stress\.inh\..*']` 再打进 jar（仓库模板保持原样不动）。
 > 独立 sandbox 副本 `/home/lys/sandbox-inh` 用于避免影响正式模块 jar。
 
+## 方法有效代码行数（L 系列，2026-09-22）
+
+> 表2 `t_class_method` 新增 `code_lines INT NULL`：方法有效代码行数 = 该方法 `LineNumberTable` 中**不同行号的个数**
+> ——注释行/空行没有字节码、天然不计入；纯 `}`、单独 `else` 等无字节码的行同样不计入（JaCoCo 口径）。
+> 纯观测列：不入唯一键、不参与注入过滤与游标分页；class 未编译行号表（`javac -g:none`）时写 **NULL**，与「真的 0 行」区分。
+> 实现：`BootJarParser.parseClass` 放弃 `SKIP_CODE`（改用 `SKIP_FRAMES`；**禁用 `SKIP_DEBUG`**，它会跳过行号表），
+> `visitMethod` 返回 MethodVisitor 在 `visitLineNumber` 去重收集、在 `visitEnd` 产出记录（行号集合为方法级临时对象）。
+> 验证环境：本机 Windows 便携 MySQL（root/root123:3306，需先手工启动 mysqld）+ 远程 192.168.193.129（lys）；
+> 载荷 `test-app.jar`（内含 `test-lib-1.0.0.jar`，白名单 `test-lib.*`）。**本系列一律不挂 watchdog，一次性手动启动**
+> （机上残留 `p-watchdog.sh` 等会自动拉起，会污染表2/表3 数据）。
+
+| # | 操作 | 命令/日志预期 | 数据库预期 | 结果 |
+| --- | --- | --- | --- | --- |
+| L1 | 本机 mysqld 启动后对已有库执行 `ALTER TABLE t_class_method ADD COLUMN code_lines INT NULL ... AFTER desc_hash` | ALTER 成功 | 新列存在、可空、不在 `uk_method` 中；存量 201 行自动为 NULL | ✅ 通过（列 `code_lines int YES`；存量行全 NULL） |
+| L2 | `TRUNCATE t_class_method` + `UPDATE t_jar_record SET status='pending',parsed_at=NULL`，以 parse-only（`mount.enabled=false`）启动 test-app | 日志 `unit stored ... classes=6 methods=39`（CLASSES，id=1695）与 `unit stored ... classes=9 methods=23`（test-lib，id=7）；无 HARD PROTECT | 表2 共 62 行（与改前排除口径一致），`code_lines` **全部非 NULL**（min=1，max=8005 = BigMethodCases.bigMethod） | ✅ 通过 |
+| L3 | 远程解压 classes 与 test-lib，用 `javap -l -p` 统计每方法去重行号数，与表2 逐方法比对 | —— | DB 每行都能在 javap 侧找到**完全相同**的 (类,方法,行数) | ✅ 通过（62/62 命中，missing=0；javap 侧多出的 3 条恰为解析器排除项：`Box.compareTo` bridge synthetic、`OuterWithInner.access$000` synthetic、`NativeCases.nativeSum` native 无行号表） |
+| L4 | 远程 `javac -g` 编译已知源码的 `CommentSample`（方法体内刻意插入单行注释、空行、块注释、纯 `{`、单独 `else`），打成 `cmt-lib-1.0.0.jar` 追加进 test-app 的 `BOOT-INF/lib`，白名单加 `cmt-lib.*` | 新增 LIB_JAR 单元并解析（id=1732，1 类 2 方法） | `compute` 的 `code_lines` = 手工计数 6（javap 行号 16/20/22/24/29/32），且**远小于**首末行跨度 17；构造器 = 3 | ✅ 通过 |
+| L5 | 同法用 `javac -g:none` 编 `NoLineSample` 打成 `nolines-lib-1.0.0.jar` 追加，白名单加 `nolines-lib.*` | 新增 LIB_JAR 单元（id=1733，1 类 2 方法） | 该单元 2 行 `code_lines` **均为 NULL**，其他单元不受影响（仍 0 个 NULL） | ✅ 通过 |
+| L6 | 同配置重启（已完成单元） | 日志 `unit already completed, skip`（CLASSES + test-lib + 两个新 lib） | 表2 行数与 `code_lines` 均不变（仅新增 L4/L5 两个新单元） | ✅ 通过 |
+| L7 | 改回 `mount.enabled=true` 启动（tag=lc3） | 挂载成功 → 应用启动中命中注入行 → 日志 `KILL current process` | 表3 新增 1 条：`tag=lc3`、`TestApplication.<init>`、line=32、thread=main、fault_seq=1（证明 SELECT/映射改动未破坏注入链路） | ✅ 通过 |
+
+### L3 的独立复核方法（无源码也能对账）
+
+```bash
+# 远程：解压 classes 与嵌套的 test-lib，逐 class 取 javap 行号表
+javap -l -p <class> | awk '方法头=以两空格开头、含 ( 且以 ; 结尾；行号行=line N: M'
+# 输出 类名|方法名|去重行号数，与下面 SQL 结果做多重集合比对
+SELECT CONCAT(class_name,'|',method_name,'|',code_lines) FROM t_class_method WHERE unit_id IN (...);
+```
+
+> 两个脚本坑（已修正，复核脚本不入库）：① 带 `throws` 的签名不以 `);` 结尾，方法头正则要放宽为「含 `(` 且以 `;` 结尾」；
+> ② `static {};` 出现在方法之后时，必须在它出现前**先 flush 上一个方法**，否则紧邻其前的方法会被吞掉（首轮因此漏了 `callNative`/`read` 两条）。
+
+### L 系列踩坑
+
+| 坑 | 现象 | 说明 |
+| --- | --- | --- |
+| 用 `zip`（默认压缩）把 lib jar 追加进 bootJar | 应用启动报 `Unable to open nested entry 'BOOT-INF/lib/cmt-lib-1.0.0.jar'. It has been compressed and nested jar files must be stored without compression` | 嵌套 jar 必须 STORED：追加时用 `zip -0` |
+
+### 验证后还原（2026-09-22 已完成）
+
+- 远程：`test-app.jar` 已从 `test-app.jar.bak-lc` 还原（两个临时 lib 已移除）；agent 内 `config.yml` 已还原为仓库默认版（可选配置全注释、mount 默认 true）；临时脚本/目录 `/tmp/lcsrc`、`/tmp/lcjavap`、`/home/lys/lc-run` 已删除；无残留 java 进程
+- 数据库：验证单元 1732/1733 及其表2 行已删除（`fault-agent-1.0.0.jar.bak-lc` 备份保留在 `/home/lys/`）；其余数据保留
+- 部署机上的 `fault-agent-1.0.0.jar` / `fault-module-1.0.0.jar` 为**含本功能的新版**
+

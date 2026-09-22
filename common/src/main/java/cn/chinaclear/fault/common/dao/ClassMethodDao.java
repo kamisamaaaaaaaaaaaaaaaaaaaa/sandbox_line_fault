@@ -26,15 +26,16 @@ public final class ClassMethodDao {
             return;
         }
         String sql = "INSERT INTO t_class_method"
-                + " (unit_id, class_name, method_name, method_desc, desc_hash) VALUES (?,?,?,?,?)";
+                + " (unit_id, class_name, method_name, method_desc, desc_hash, code_lines)"
+                + " VALUES (?,?,?,?,?,?)";
         List<Object[]> rows = new ArrayList<>(methods.size());
         for (ClassMethodInfo m : methods) {
             rows.add(new Object[]{unitId, m.getClassName(), m.getMethodName(),
-                    m.getMethodDesc(), m.getDescHash()});
+                    m.getMethodDesc(), m.getDescHash(), m.getCodeLines()});
         }
         db.batchInsertSkipConflict(sql, rows, row -> "class=" + row[1] + " method=" + row[2]
                 + " descLen=" + (row[3] == null ? 0 : ((String) row[3]).length())
-                + " descHash=" + row[4] + " desc=" + row[3]);
+                + " descHash=" + row[4] + " codeLines=" + row[5] + " desc=" + row[3]);
     }
 
     /** 按单元 id 列表读取全部类-方法（IN 分批） */
@@ -111,7 +112,7 @@ public final class ClassMethodDao {
         return c != 0 ? c : Long.compare(a.getId(), b.getId());
     }
 
-    /** 模块侧读取：仅用于 watch 注册（按类名+方法名匹配），descHash 不参与故不查询、置 null */
+    /** 模块侧读取：仅用于 watch 注册（按类名+方法名匹配），descHash 与 codeLines 不参与故不查询、置 null */
     private static ClassMethodInfo map(ResultSet rs) throws java.sql.SQLException {
         return new ClassMethodInfo(
                 rs.getLong("id"),
@@ -119,6 +120,7 @@ public final class ClassMethodDao {
                 rs.getString("class_name"),
                 rs.getString("method_name"),
                 rs.getString("method_desc"),
+                null,
                 null);
     }
 

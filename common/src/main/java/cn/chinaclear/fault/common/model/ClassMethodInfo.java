@@ -27,4 +27,12 @@ public class ClassMethodInfo {
      * 与表3 boot_jar_hash 同一模式：摘要入索引、原文另存。
      */
     private String descHash;
+    /**
+     * 方法有效代码行数：该方法 LineNumberTable 中不同行号的个数。
+     * 注释行与空行没有字节码、天然不计入；纯 '}'、单独 else 之类无字节码的行同样不计入
+     * （等价 JaCoCo 的「有效代码行」口径）。纯观测字段：不入唯一键、不参与注入。
+     * 用包装类型承载 NULL：null 表示该 class 未编译行号信息（如 javac -g:none），
+     * 与「真的 0 行」区分；模块侧 watch 注册用不到它，读取时置 null。
+     */
+    private Integer codeLines;
 }

@@ -3,6 +3,7 @@ package cn.chinaclear.fault.common;
 import cn.chinaclear.fault.common.model.ClassMethodInfo;
 import org.objectweb.asm.ClassReader;
 import org.objectweb.asm.ClassVisitor;
+import org.objectweb.asm.Label;
 import org.objectweb.asm.MethodVisitor;
 import org.objectweb.asm.Opcodes;
 
@@ -10,7 +11,9 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.nio.file.Path;
 import java.util.Enumeration;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 import java.util.regex.Pattern;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipFile;
@@ -24,7 +27,7 @@ import java.util.zip.ZipInputStream;
  * 每解析到一个单元先回调 {@link UnitHandler#beginUnit}：
  * 返回 sink 则开始流式解析该类内容（方法逐条 push，由调用方按批写库）；
  * 返回 null 则跳过该单元的内容解析（用于"已解析过"的快速跳过，省去 ASM 开销）。
- * 每个单元输出类-方法明细（方法名 + 描述符），
+ * 每个单元输出类-方法明细（方法名 + 描述符 + 有效代码行数），
  * 排除 &lt;clinit&gt;、abstract 方法、native 方法与 synthetic（lambda 除外）。
  * 各排除原因见 {@link #parseClass}：收录后都得不到命中，只会虚增覆盖率分母。
  */
@@ -128,6 +131,10 @@ public final class BootJarParser {
      * 而本模块只监听 beforeLine，注册后同样永不回调）；
      * synthetic 方法仅纳入 lambda（lambda$ 前缀，其体内为用户逻辑），
      * 其余 synthetic（bridge/access$ 转发）排除以避免重复命中。
+     *
+     * 每个收录方法额外统计「有效代码行数」= 该方法 LineNumberTable 中不同行号的个数：
+     * 注释行与空行没有字节码、天然不计入；纯 '}'、单独 else 之类无字节码的行同样不计入。
+     * 未编译行号表（如 javac -g:none）的方法该值为 null，与「0 行」区分。
      */
     private static void parseClass(InputStream in, final String entryName, final UnitSink sink) {
         try {
@@ -166,12 +173,31 @@ public final class BootJarParser {
                         return null;
                     }
                     // 描述符完整入库（TEXT 列，不入索引）；区分重载由 descHash 承担。
-                    // 列宽不做预检：超限由数据库判定，异常时 JdbcHelper 的行级上下文会带出完整方法信息
-                    sink.accept(new ClassMethodInfo(0L, 0L, className, name, desc,
-                            JarHashUtil.md5Hex16(desc)));
-                    return null;
+                    // 列宽不做预检：超限由数据库判定，异常时 JdbcHelper 的行级上下文会带出完整方法信息。
+                    // 行数要等整方法的行号表读完才知道，故产出动作放到 visitEnd。
+                    // 行号集合是方法级临时对象（读完即弃），不改变「方法不驻留内存」的流式模型
+                    return new MethodVisitor(Opcodes.ASM9) {
+                        private final Set<Integer> lines = new HashSet<>();
+                        private boolean hasLineTable;
+
+                        @Override
+                        public void visitLineNumber(int line, Label start) {
+                            hasLineTable = true;
+                            lines.add(line);
+                        }
+
+                        @Override
+                        public void visitEnd() {
+                            sink.accept(new ClassMethodInfo(0L, 0L, className, name, desc,
+                                    JarHashUtil.md5Hex16(desc),
+                                    hasLineTable ? Integer.valueOf(lines.size()) : null));
+                        }
+                    };
                 }
-            }, ClassReader.SKIP_CODE);
+                // SKIP_CODE 会整体跳过 Code 属性（行号表在其中），故不能用；
+                // SKIP_DEBUG 同样会跳过 LineNumberTable，必须禁用。
+                // SKIP_FRAMES 只跳过 StackMapTable、保留行号表，用于抵掉一部分方法体解析开销
+            }, ClassReader.SKIP_FRAMES);
         } catch (Exception e) {
             // 单个 class 解析失败 = 解析结果不完整，按硬保护处理（宁可 kill 也不放过解析不完整的进程）
             throw new IllegalStateException("parse class failed: " + entryName + " - " + e.getMessage(), e);

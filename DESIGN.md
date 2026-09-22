@@ -82,7 +82,9 @@ JDK9 起 `-jar` 及其路径被归入 main 侧参数，不出现在 `RuntimeMXBe
 
 - **粒度 = 解析单元**：`BOOT-INF/classes/` 整体一个单元，hash = 目录下全部 `.class` 条目按路径排序后内容聚合 SHA-256；白名单命中的每个 lib jar 各一个单元，hash = 字节流 SHA-256。任何类改动重打包后单元 hash 变化，自动触发重新解析。
 - **classes 单元可关闭**（`parse.classes.enabled`，默认 true）：置为 false 时该单元整体跳过——包括它的哈希计算（要遍历整个 classes 目录，不跳过就白算）——应用代码既不落表2 也不注入故障，对应"只对第三方组件做故障演练"的场景。此时单元集合可能为空（白名单也未命中任何 jar 时），直接硬保护 `PARSE`：一个"挂载了但零覆盖"的进程比启动失败更危险，因为它看起来一切正常。
-- **行号不入库**：sandbox 的 `beforeLine(advice, lineNum)` 回调自带行号，静态解析只需方法名 + 描述符；表2 的唯一索引 `uk(unit_id,class,method,desc_hash)` 配合裸 INSERT 冲突跳过实现幂等。
+- **行号明细不入库，只存去重行数**：sandbox 的 `beforeLine(advice, lineNum)` 回调自带行号，注入只需方法名 + 描述符；表2 的唯一索引 `uk(unit_id,class,method,desc_hash)` 配合裸 INSERT 冲突跳过实现幂等。表2 额外记录每个方法的 `code_lines`（有效代码行数）= 该方法 `LineNumberTable` 中**不同行号的个数**：注释行与空行没有字节码、天然不计入，纯 `}`、单独 `else` 之类无字节码的行同样不计入（等价 JaCoCo 口径）。纯观测字段：不入唯一键、不参与注入与游标分页；class 未编译行号表（如 `javac -g:none`）时写 NULL，与「真的 0 行」区分。
+  - 代价：取行号必须读方法体字节码，不能用 `ClassReader.SKIP_CODE`（它整体跳过 Code 属性），也不能加 `SKIP_DEBUG`（跳过 `LineNumberTable`）；现用 `SKIP_FRAMES` 只跳过 `StackMapTable` 抵一部分开销。该成本只在单元首次解析时发生一次（completed 单元跳过 ASM 解析）。
+  - 行号集合是**方法级临时对象**（`visitEnd` 产出记录后即弃），流式解析 + 分批写库的内存模型不变。
 - **流式解析 + 分批写库**：`BootJarParser` 以 `UnitSink` 回调逐条 push 方法，`UnitWriter` 累积到 `parse.batch.size` 即写库一次，单元结束 flush 剩余。内存占用为 O(一批方法 + 类名集合)，大项目不会打爆内存。
 - **已完成单元跳过内容解析**：`beginUnit` 返回 null 时跳过该单元的 ASM 解析（仍计算 hash 用于判定）。
 - **方法注册口径**（过滤在 `BootJarParser.parseClass` 内，按访问标志与方法名判定）：
@@ -368,7 +370,7 @@ agent 与 sandbox module 仅通过 DB 表与进程调用交互，无跨 loader �
 | 表 | 语义 | 关键约束 |
 |---|---|---|
 | `t_jar_record` | 解析单元（两态：completed / 未完成） | `uk(sha256)` 登记（不用于抢占）。单元以**内容** hash 为键：同一 jar 部署在多个路径时共用同一 unit，应用区分由 `t_fault_record` 的 `boot_jar_hash` 负责 |
-| `t_class_method` | 类-方法明细 | `uk(unit_id,class,method,desc_hash)` 幂等（裸 INSERT 冲突跳过）。描述符原文 `method_desc TEXT` 完整保留、不入索引；索引键为 `desc_hash`（MD5 前 16 hex）——描述符长度不定，超多参数方法可达 KB 级，入索引既超列宽也超字节预算 |
+| `t_class_method` | 类-方法明细 + 有效代码行数 | `uk(unit_id,class,method,desc_hash)` 幂等（裸 INSERT 冲突跳过）。描述符原文 `method_desc TEXT` 完整保留、不入索引；索引键为 `desc_hash`（MD5 前 16 hex）——描述符长度不定，超多参数方法可达 KB 级，入索引既超列宽也超字节预算。`code_lines INT NULL` 为纯观测列（去重行号数），不入唯一键，NULL = 该 class 未编译行号表 |
 | `t_fault_record` | 故障命中（含轮次 tag、第几次故障、调用栈、方法签名） | **`uk(tag, boot_jar_hash, class, method, line, thread_name, fault_seq, stack_hash)`** 轮内抢占，粒度为「行+线程+调用栈+第几次」；`method_desc TEXT` 记录命中方法的 ASM 描述符（供区分重载，**不参与判重**——`(class, method, line)` 已能唯一定位一个重载）；`ip` 为普通列仅记录死亡节点 |
 | `t_error_record` | 工具自身错误 | `message` / `detail` 为 MEDIUMTEXT：错误消息可能携带完整的问题数据（如完整方法描述符），异常栈可达数百 KB。写入统一在 `ErrorRecordDao` 按列宽兜底，覆盖全部写入路径 |
 
@@ -393,6 +395,7 @@ agent 与 sandbox module 仅通过 DB 表与进程调用交互，无跨 loader �
 | 观测型长文本 | `TEXT` / `MEDIUMTEXT` 完整保留，**不入索引** | `method_desc`、`stack_text`、`t_error_record.message` / `detail` |
 | 需参与判重的长文本 | 另加定长 hash 列入索引，原文仍以长文本保留 | `t_class_method.desc_hash`、`boot_jar_hash`、`stack_hash` |
 | 标识型字段 | 保留 `VARCHAR` 保证可读可查，长度取工程上限 | `class_name`(256)、`method_name`(128)、`boot_jar`(512)、`tag`(64) |
+| 计数/标量观测值 | 直接以 `INT` 等定长类型存储；**可空**用于表达「未采集/无信息」，与「值为 0」区分 | `t_class_method.code_lines`（NULL = 该 class 未编译行号表） |
 
 写入侧**不做列宽预检**：列宽约束交由数据库判定，违反时由 `JdbcHelper` 的行级上下文输出该行完整数据
 （类名、方法名、描述符原文与长度、摘要），随异常进入硬保护日志与 `t_error_record`，

@@ -307,7 +307,7 @@ MySQL → PostgreSQL 的类型映射（`schema.sql` 为 MySQL 方言）：
 | `DATETIME` / `DATETIME DEFAULT CURRENT_TIMESTAMP` | `TIMESTAMP` / `TIMESTAMP DEFAULT CURRENT_TIMESTAMP` | 表1 `parsed_at` / `updated_at`、表3 `occurred_at`、表4 `created_at` |
 | `CHAR(n)` | `VARCHAR(n)` | 表1 `sha256`、表3 `boot_jar_hash` / `stack_hash`（PG 的 `CHAR(n)` 会空格填充） |
 | `MEDIUMTEXT` | `TEXT` | 表3 `stack_text`（PG 无 MEDIUMTEXT，TEXT 无长度上限） |
-| `INT` | `INTEGER` | 表1 `class_count` / `method_count`、表3 `line_no` / `fault_seq` |
+| `INT` | `INTEGER` | 表1 `class_count` / `method_count`、表2 `code_lines`、表3 `line_no` / `fault_seq` |
 | `ENGINE=InnoDB DEFAULT CHARSET=utf8mb4` | 去掉 | PG 的字符集在 `CREATE DATABASE` 时指定 |
 | `CREATE DATABASE IF NOT EXISTS` | 需提前建库 | PG 不支持该语法 |
 | `UNIQUE KEY uk_xxx (...)` | `CONSTRAINT uk_xxx UNIQUE (...)` | 表2 幂等与表3 抢占均依赖唯一键冲突 |
@@ -574,6 +574,7 @@ INFO 覆盖各阶段里程碑与注入过程概况；WARN / ERROR 出现即需�
 | native 方法不注入 | sandbox 虽会去掉 native 并生成代理方法完成织入，但只插 BEFORE/RETURN/THROWS、不插 LINE（native 无 Code 属性也就没有行号表），本模块只监听 `beforeLine`，故同样永不回调；解析阶段即排除 |
 | bridge / `access$xxx` synthetic 方法不注入 | 转发型 synthetic 的行号表指向类声明行，收录注册后会产生落在类声明行上的命中记录（非业务行，污染覆盖率先行口径）；仅保留 `lambda$` 前缀 |
 | lambda（`lambda$xxx`）会注入 | lambda 体内是用户逻辑；lambda 体被 javac 抽为原类的私有合成方法，有字节码有 LNT |
+| 表2 `code_lines` 只统计有字节码的行 | 口径为 `LineNumberTable` 去重行号数：注释行、空行、纯 `}` / 单独 `else` 等无字节码的行不计入；class 未编译行号表（`javac -g:none`）时该列为 NULL，**不是 0**。该列纯观测，不参与判重与注入 |
 | `$$Lambda$` 运行时壳类不注入 | JVM 现场生成的转发壳，无 LNT、名字带随机序号、无业务逻辑 |
 | JVM 入口 `main` 方法不注入 | sandbox 硬编码跳过（无配置开关）。这对 premain 模式是保护：main 在挂载完成后才执行，若可注入则首个进程会在 main 首行被 kill，应用永远无法启动 |
 | 构造器 `super()` 之前的行不触发 | JVM 校验器约束：super() 前 `this` 为 `uninitializedThis`，行级探针需携带 `this`，压栈即 `VerifyError`；ASM 把探针推迟到 super() 之后，super() 前的 LNT 行被静默丢弃。静态方法首行不受此约束 |
