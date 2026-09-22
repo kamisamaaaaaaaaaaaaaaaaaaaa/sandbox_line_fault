@@ -774,3 +774,31 @@ javac 会把 finally 的代码**复制**到正常路径与异常路径各一份�
 
 agent / module 内 `config.yml` 均从备份还原为仓库默认版；`special-cases.jar`、样例源码目录、watchdog 目录、临时脚本已删除；无残留 java 进程。
 
+## 重载方法按 method_desc 区分覆盖率（L12，2026-09-22）
+
+> 背景：方法级覆盖率若按 `(class, method_name)` 合并，同名重载会被并成一行，无法区分各重载的覆盖情况。
+> 表3 的 `method_desc` 记录了命中重载的完整签名，可按重载拆分统计。
+> 载荷：样例新增 `lcsample.Overloaded`（`calc(int)` 与 `calc(String)` 两个重载，各 1 行有效代码），
+> jar 重建后 sha256 变化 → 新单元 2287（4 类 26 方法 / 98 行）；tag=`lc-sc2`，3 实例并行推进。
+
+| # | 验证点 | 预期 | 结果 |
+| --- | --- | --- | --- |
+| L12-1 | 解析：两个 `calc` 重载在表2 为两行（`desc_hash` 不同） | 是 | ✅（`calc` × 2 行，各自 1 行 code_lines） |
+| L12-2 | 命中：两个重载各自命中各自的行，表3 `method_desc` 分别为 `(I)I` / `(Ljava/lang/String;)I` | 是 | ✅（`calc(int)` → line 6；`calc(String)` → line 10） |
+| L12-3 | 方法级 SQL 按 `desc_hash` 拆分 | 两个 `calc` 各一行，各 1/1 = 100% | ✅ |
+| L12-4 | 类级合并 | `Overloaded` 3 行 / 2 命中 = 66.7%（`<init>` 的 `super()` 行未命中） | ✅ |
+| L12-5 | 整体对账 | 静态 98；命中 60；差集 38 = main 31 + `super()` 首行 4（SC/Main/OV `<init>`）+ 未调用 2（`neverCalled`/`concreteOp`）+ 不可达 `athrow` 1（`allThree\|74`） | ✅ |
+
+### L12 附带发现：不同调用点 → 不同调用栈 → 各占一次故障机会
+
+`SpecialCases.allThree` 的 66 行与 73 行**各出现两条表3 记录**——不是同一行多插桩点，而是
+`allThree(false)` 与 `allThree(true)` 在 main 里的**调用点行号不同**（`main:17` vs `main:18`），
+调用栈文本不同 → `stack_hash` 不同 → 判重键不同 → 各占一次独立的故障机会（`fault_seq` 均为 1）。
+这是判重键按调用栈区分的既定语义：估算故障总量时，"同一行"要按**不同调用路径**分别计数。
+
+### 方法级覆盖率的两种口径（README 6.5 已同步）
+
+- **按重载拆分**（默认）：`GROUP BY (class, method, desc_hash)`，分子按表3 `method_desc` 匹配到具体重载；
+- **按方法名合并**：重载行号互不重叠，类 / jar 级合并不重复计数；
+- 分母始终是表2 `code_lines`（含全部重载行）。
+

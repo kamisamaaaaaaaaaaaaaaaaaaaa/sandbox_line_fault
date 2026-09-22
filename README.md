@@ -409,7 +409,7 @@ sandbox 每次挂载会把 `sandbox-module/` 目录下**全部**模块 jar 复�
    ```
 
 3. **命中行按 `DISTINCT` 去重**：同一行会被多个线程 / 多种调用栈 / 多次 `fault_seq` 触发产生多条表3 记录，统计行覆盖时只数不同的 `(类, 方法, 行)` 组合；
-4. **重载方法在表2 是多行**（`desc_hash` 区分），方法级统计按 `(class_name, method_name)` 合并（分母 `SUM(code_lines)` 含全部重载）。
+4. **重载方法在表2 是多行**（`desc_hash` 区分不同签名）。方法级统计**按重载逐个展示**：表3 的 `method_desc` 记录了命中重载的签名，按 `(class_name, method_name, desc_hash)` 拆分后每个重载各有一行覆盖率；类 / jar 级再把重载合并——不同重载的行号表互不重叠，合并不会重复计数。
 
 以下示例把 `'YOUR_TAG'` 替换为实际轮次标识、`(...)` 替换为本轮 unit_id 列表（如 `(2038)` 或 `(1695, 7)`）。
 
@@ -461,26 +461,28 @@ GROUP BY jar, class_name
 ORDER BY coverage_pct ASC;
 ```
 
-**方法层级**（可按若干类 / 若干 jar 过滤）：
+**方法层级**（按重载逐个展示，可按若干类 / 若干 jar 过滤；`desc_hash` 用于区分同名重载）：
 
 ```sql
-SELECT jar, class_name, method_name, total_lines, hit_lines,
+SELECT jar, class_name, method_name, desc_hash, total_lines, hit_lines,
        ROUND(hit_lines / total_lines * 100, 1) AS coverage_pct
 FROM (
-    SELECT j.source_jar AS jar, m.class_name, m.method_name,
+    SELECT j.source_jar AS jar, m.class_name, m.method_name, m.desc_hash,
            SUM(m.code_lines) AS total_lines,
            MAX(COALESCE(h.hit_lines, 0)) AS hit_lines
     FROM t_class_method m
     JOIN t_jar_record j ON j.id = m.unit_id
     LEFT JOIN (
-        SELECT unit_id, class_name, method_name, COUNT(DISTINCT line_no) AS hit_lines
+        SELECT unit_id, class_name, method_name, COALESCE(method_desc, '') AS method_desc,
+               COUNT(DISTINCT line_no) AS hit_lines
         FROM t_fault_record WHERE tag = 'YOUR_TAG'
-        GROUP BY unit_id, class_name, method_name
-    ) h ON h.unit_id = m.unit_id AND h.class_name = m.class_name AND h.method_name = m.method_name
+        GROUP BY unit_id, class_name, method_name, COALESCE(method_desc, '')
+    ) h ON h.unit_id = m.unit_id AND h.class_name = m.class_name
+       AND h.method_name = m.method_name AND h.method_desc = m.method_desc
     WHERE m.unit_id IN (...)
       -- AND m.class_name IN ('cn.demo.OrderService', 'cn.demo.PayService')   -- 按类过滤
       -- AND j.source_jar LIKE 'test-lib-%'                                    -- 按 jar 前缀过滤
-    GROUP BY j.source_jar, m.class_name, m.method_name
+    GROUP BY j.source_jar, m.class_name, m.method_name, m.desc_hash, m.method_desc
 ) x
 ORDER BY coverage_pct ASC;
 ```
