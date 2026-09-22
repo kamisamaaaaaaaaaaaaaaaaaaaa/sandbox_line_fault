@@ -667,7 +667,9 @@ SELECT CONCAT(class_name,'|',method_name,'|',code_lines) FROM t_class_method WHE
 | `finally` 块内语句 | **有** | 编译器把 finally 复制到各出口路径，行号仍指向 finally 内源码行 |
 | `throw xxx;` | **有** | `athrow` 指令 |
 | try 块结尾 `}` | 可能**有** | 块结束的 `goto` 落在该行：`printIsolationCheck` 85 行 = pc 73 `goto 102`；`lambda$runBoundaryChain$12` 135 行 = pc 27 `goto 37` |
-| **方法结尾 `}`** | **有** | 承载 `return`：`printIsolationCheck` 86 行 = pc 102 `return`；`lambda$auditAll$0` 85 行 = pc 97 `return` |
+| 方法结尾 `}`（**无显式 return**） | **有** | javac 补的隐式 `return` 落在该行：`printIsolationCheck` 86 行 = pc 102 `return`；`lambda$startupRunner$0` 68 行 = pc 158 `return` |
+| 方法结尾 `}`（**有显式 `return xxx;`**） | **没有** | 返回指令标注在 return 语句行，结尾 `}` 不再产生指令：`OrderService.count` 的 LNT 只有 65/66/67（67 = pc 36 `ireturn`，即 `return size;` 行）；`amountChecker` 只有 47/48（48 = pc 9 `areturn`） |
+| 显式 `return xxx;` 行 | **有** | 表达式求值 + `ireturn`/`areturn` 等均在该行（同上）；void 的裸 `return;` 同理 |
 | 普通块结尾 `}` | 通常**没有** | 无指令生成 |
 | 注释 / 空行 / 单独 `{` | **没有** | 无指令生成。L4 的 `CommentSample.compute` 实测只有 16/20/22/24/29/32 六行，注释、空行、单独 `{`、`}`、`else` 全部不在内 |
 
