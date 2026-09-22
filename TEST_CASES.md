@@ -651,6 +651,33 @@ SELECT CONCAT(class_name,'|',method_name,'|',code_lines) FROM t_class_method WHE
   ③ 是否是被织入绕开的构造器首行（类别 ②，默认构造器因此整方法不可命中）；④ 线程维度（线程过滤或该行只在其他线程执行，类别 ①⑤）。
 - 实践含义：用 `code_lines` 估「本轮最多可能产生多少条故障/需要多少个进程周期」时要按上述四类打折扣；本应用 main 路径实测 95/180。
 
+### 附：行号归属规则（哪些行会进入 `code_lines` 统计）
+
+> `LineNumberTable` 是 javac 生成的「字节码 pc → 源码行号」映射表：**每条真实生成的指令**被标注为"来自源码第几行"，
+> 没有指令生成的位置（注释、空行、纯语法行）就没有条目。所以行号不是关键字的编号，而是**指令的归属行**。
+> 本表全部来自本项目实测字节码。
+
+| 源码构造 | 是否有行号条目 | 实测依据 |
+| --- | --- | --- |
+| `if (cond)` 行 | **有** | 条件跳转 `ifeq`/`ifle` 落在该行：`lambda$auditAll$0` 的 80 行 = `iload_2` + `ifeq 72` |
+| `} else {` / 单独 `else` | 通常**没有** | 分支内第一条指令落在 else 块内的语句行：`lambda$auditAll$0` 缺 82 行，reject 分支首条指令在 83 |
+| `else if (...)` | **有** | 该行承载新的条件跳转指令 |
+| `try {` 独占一行 | 通常**没有** | try 块内第一条指令落在块内首个语句行 |
+| `} catch (X e) {` | **有** | handler 入口的 `astore`（异常对象存入局部变量）在该行：`printIsolationCheck` 83 行 = pc 76 `astore_0`；`lambda$runBoundaryChain$12` 133 行 = pc 30 `astore_2` |
+| `finally` 块内语句 | **有** | 编译器把 finally 复制到各出口路径，行号仍指向 finally 内源码行 |
+| `throw xxx;` | **有** | `athrow` 指令 |
+| try 块结尾 `}` | 可能**有** | 块结束的 `goto` 落在该行：`printIsolationCheck` 85 行 = pc 73 `goto 102`；`lambda$runBoundaryChain$12` 135 行 = pc 27 `goto 37` |
+| **方法结尾 `}`** | **有** | 承载 `return`：`printIsolationCheck` 86 行 = pc 102 `return`；`lambda$auditAll$0` 85 行 = pc 97 `return` |
+| 普通块结尾 `}` | 通常**没有** | 无指令生成 |
+| 注释 / 空行 / 单独 `{` | **没有** | 无指令生成。L4 的 `CommentSample.compute` 实测只有 16/20/22/24/29/32 六行，注释、空行、单独 `{`、`}`、`else` 全部不在内 |
+
+两个易混淆点：
+
+- **同一行号可出现多次**：`printIsolationCheck` 的 81 行同时对应 pc 42 与 pc 70（中间插了别的行的指令），
+  故 `code_lines` 取**去重**行号数，它既不等于指令段数、也不等于源码物理行数。
+- **"看起来只是语法"的行也会计入**：`if` / `catch` / 方法尾 `}` 分别承载了条件跳转、`astore`、`return`，
+  所以都在统计内；被排除的只有**完全不产生指令**的行。这正是该口径叫"有效代码行"（同 JaCoCo）而非"物理行数"的原因。
+
 ### 本轮踩坑与还原
 
 | 坑 | 现象 | 处理 |
