@@ -387,6 +387,116 @@ sandbox 每次挂载会把 `sandbox-module/` 目录下**全部**模块 jar 复�
 
 排障提示：若挂载阶段出现 `No space left on device` 或挂载 404，先检查临时目录占用：`du -sh /tmp/sandbox_module_jar_* 2>/dev/null | sort -h | tail`。
 
+### 6.5 覆盖率统计（SQL）
+
+**覆盖率 = 命中行去重数 ÷ 表2 `code_lines`**。四个前提（**第 1 条最易踩坑**）：
+
+1. **先按方法聚合命中，再与表2 关联**：表3 相对表2 是一对多（同一方法被多线程 / 多调用栈 / 多次 `fault_seq` 触发），直接把两张表同层 `LEFT JOIN` 后 `SUM(m.code_lines)`，分母会按命中次数被放大（实测一个 92 行的库被放大成 337）。下面的 SQL 都先把命中按 `(unit_id, class_name, method_name)` 预聚合为 `hit_lines`，再与表2 关联；
+2. **必须限定本轮的 unit_id**：表1 中同一 jar 历史版本会产生多个单元（sha256 变化即新单元），不过滤会把旧单元的行重复计入分母，稀释覆盖率。两种取法：
+   - 直接看 agent 日志的 `parse units: count=N ids=[...]`，把 ids 填进下面的 SQL；
+   - 或用 SQL 取该 bootJar 下每个 `(unit_type, source_jar)` **最新**的完成单元：
+
+   ```sql
+   SELECT id, unit_type, source_jar, class_count, method_count
+   FROM t_jar_record j
+   WHERE status = 'completed'
+     AND id = (SELECT MAX(x.id) FROM t_jar_record x
+               WHERE x.unit_type  = j.unit_type
+                 AND x.source_jar = j.source_jar
+                 AND x.boot_jar   = j.boot_jar
+                 AND x.status     = 'completed')
+   ORDER BY id;
+   ```
+
+3. **命中行按 `DISTINCT` 去重**：同一行会被多个线程 / 多种调用栈 / 多次 `fault_seq` 触发产生多条表3 记录，统计行覆盖时只数不同的 `(类, 方法, 行)` 组合；
+4. **重载方法在表2 是多行**（`desc_hash` 区分），方法级统计按 `(class_name, method_name)` 合并（分母 `SUM(code_lines)` 含全部重载）。
+
+以下示例把 `'YOUR_TAG'` 替换为实际轮次标识、`(...)` 替换为本轮 unit_id 列表（如 `(2038)` 或 `(1695, 7)`）。
+
+**jar 包层级**（应用自身代码的单元，其 `source_jar` 即 bootJar 文件名）：
+
+```sql
+SELECT jar, SUM(total_lines) AS total_lines, SUM(hit_lines) AS hit_lines,
+       ROUND(SUM(hit_lines) / SUM(total_lines) * 100, 1) AS coverage_pct
+FROM (
+    SELECT j.source_jar AS jar, m.class_name, m.method_name,
+           SUM(m.code_lines) AS total_lines,
+           MAX(COALESCE(h.hit_lines, 0)) AS hit_lines
+    FROM t_class_method m
+    JOIN t_jar_record j ON j.id = m.unit_id
+    LEFT JOIN (
+        SELECT unit_id, class_name, method_name, COUNT(DISTINCT line_no) AS hit_lines
+        FROM t_fault_record WHERE tag = 'YOUR_TAG'
+        GROUP BY unit_id, class_name, method_name
+    ) h ON h.unit_id = m.unit_id AND h.class_name = m.class_name AND h.method_name = m.method_name
+    WHERE m.unit_id IN (...)
+    GROUP BY j.source_jar, m.class_name, m.method_name
+) x
+GROUP BY jar
+ORDER BY coverage_pct ASC;      -- 从小到大：最差的 jar 排最前
+```
+
+**类层级**（可加 jar 过滤，如只看某个 jar 里所有类）：
+
+```sql
+SELECT jar, class_name, SUM(total_lines) AS total_lines, SUM(hit_lines) AS hit_lines,
+       ROUND(SUM(hit_lines) / SUM(total_lines) * 100, 1) AS coverage_pct
+FROM (
+    SELECT j.source_jar AS jar, m.class_name, m.method_name,
+           SUM(m.code_lines) AS total_lines,
+           MAX(COALESCE(h.hit_lines, 0)) AS hit_lines
+    FROM t_class_method m
+    JOIN t_jar_record j ON j.id = m.unit_id
+    LEFT JOIN (
+        SELECT unit_id, class_name, method_name, COUNT(DISTINCT line_no) AS hit_lines
+        FROM t_fault_record WHERE tag = 'YOUR_TAG'
+        GROUP BY unit_id, class_name, method_name
+    ) h ON h.unit_id = m.unit_id AND h.class_name = m.class_name AND h.method_name = m.method_name
+    WHERE m.unit_id IN (...)
+      -- AND j.source_jar = 'test-lib-1.0.0.jar'          -- 按单个 jar 过滤
+      -- AND j.source_jar IN ('test-lib-1.0.0.jar', ...)  -- 按多个 jar 过滤
+    GROUP BY j.source_jar, m.class_name, m.method_name
+) x
+GROUP BY jar, class_name
+ORDER BY coverage_pct ASC;
+```
+
+**方法层级**（可按若干类 / 若干 jar 过滤）：
+
+```sql
+SELECT jar, class_name, method_name, total_lines, hit_lines,
+       ROUND(hit_lines / total_lines * 100, 1) AS coverage_pct
+FROM (
+    SELECT j.source_jar AS jar, m.class_name, m.method_name,
+           SUM(m.code_lines) AS total_lines,
+           MAX(COALESCE(h.hit_lines, 0)) AS hit_lines
+    FROM t_class_method m
+    JOIN t_jar_record j ON j.id = m.unit_id
+    LEFT JOIN (
+        SELECT unit_id, class_name, method_name, COUNT(DISTINCT line_no) AS hit_lines
+        FROM t_fault_record WHERE tag = 'YOUR_TAG'
+        GROUP BY unit_id, class_name, method_name
+    ) h ON h.unit_id = m.unit_id AND h.class_name = m.class_name AND h.method_name = m.method_name
+    WHERE m.unit_id IN (...)
+      -- AND m.class_name IN ('cn.demo.OrderService', 'cn.demo.PayService')   -- 按类过滤
+      -- AND j.source_jar LIKE 'test-lib-%'                                    -- 按 jar 前缀过滤
+    GROUP BY j.source_jar, m.class_name, m.method_name
+) x
+ORDER BY coverage_pct ASC;
+```
+
+说明：
+
+- `LEFT JOIN` 保证**零命中的方法/类/jar 也会出现**（`hit_lines = 0`），不会从统计里消失——这正是覆盖率的分母口径；
+- 方法级 join 同时匹配 `class_name` 与 `method_name`；同一类的不同方法行号不重叠，类/jar 级去重时再带上 `method_name` 即可；
+- 命中记录的行号以 `beforeLine` 上报为准，行级明细直接查：
+
+  ```sql
+  SELECT class_name, method_name, line_no, COUNT(*) AS triggers, GROUP_CONCAT(DISTINCT thread_name) AS threads
+  FROM t_fault_record WHERE tag = 'YOUR_TAG'
+  GROUP BY class_name, method_name, line_no ORDER BY class_name, method_name, line_no;
+  ```
+
 ---
 
 ## 7. 日志速查
