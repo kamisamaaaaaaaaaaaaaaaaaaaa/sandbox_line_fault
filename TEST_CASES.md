@@ -592,3 +592,74 @@ SELECT CONCAT(class_name,'|',method_name,'|',code_lines) FROM t_class_method WHE
 - 数据库：验证单元 1732/1733 及其表2 行已删除（`fault-agent-1.0.0.jar.bak-lc` 备份保留在 `/home/lys/`）；其余数据保留
 - 部署机上的 `fault-agent-1.0.0.jar` / `fault-module-1.0.0.jar` 为**含本功能的新版**
 
+## 行覆盖率与未命中行归因（L8 / L9，2026-09-22）
+
+> 要回答的问题：`code_lines`（去重行号数）统计出来的行，**是不是每一行都能被 sandbox 捕获成故障行**。
+> 方法：应用包全部方法（`cn.chinaclear.fault.testapp.*`，unitId=1695，**39 方法 / code_lines 合计 180 行**）全量注入，
+> 3 个实例（端口 8081/8082/8083，同 tag `lc-cov1`）由 watchdog 反复拉起推进；后期按用户要求**只统计 main 线程**
+> （module 侧加 `thread.include: ['main']`，Tomcat 线程不计）。
+> 判停：三实例重启次数停止增长（66 / 66 / 64）、进程能正常启动并长跑 = main 路径上能命中的行已全部命中并放行。
+
+### 推进机制与并行（本轮实测认识）
+
+- 命中即 kill，**一个进程周期只推进一行**；放行后进程继续往下执行，遇到下一个未命中行再命中。
+- **并行有效**：同 tag 下同一行只被抢占一次，抢到的实例被 kill，**其余实例因冲突放行继续往下走到下一个未命中行**，
+  因此 N 个实例能在同一时间窗口推进多行（本轮 3 实例）。
+- **并行的副作用**：Tomcat 线程名含端口且随请求序号漂移（实测出现 18 种 `http-nio-808x-exec-N`），
+  同一行在不同线程名下会各命中一次，白白多耗轮次 → 这也是收窄到「只统计 main 线程」的直接原因。
+
+### L8 行覆盖率（main 线程口径）
+
+| 方法 | code_lines | 命中 | 说明 |
+| --- | --- | --- | --- |
+| `TestApplication.lambda$startupRunner$0` | 15 | 15 | 启动 runner 主体，全覆盖 |
+| `TestApplication.runBoundaryChain` | 11 | 11 | 全覆盖 |
+| `OrderService.auditAll` | 7 | 7 | 全覆盖 |
+| `TestApplication.printIsolationCheck` | 9 | 7 | 缺 catch 分支 2 行（见 L9） |
+| `TestApplication.safe` / `lambda$runBoundaryChain$7` | 5 / 5 | 5 / 5 | 全覆盖 |
+| `ProxyTargetService.proxiedCall` | 5 | 5 | 全覆盖 |
+| `BoundaryAspect.logEntry` | 2 | 2 | 全覆盖 |
+| `lambda$runBoundaryChain$12` | 8 | 6 | 缺 InterruptedException catch 2 行 |
+| `OrderService.lambda$auditAll$0` | 7 | 6 | 缺 reject 分支 1 行 |
+| `OrderService.<init>` / `TestApplication.<init>` / `OrderController.<init>` | 6 / 3 / 3 | 5 / 2 / 2 | 各缺构造器首行 1 行 |
+| 其余 10 个小 lambda / `amountChecker` / `idGenerator` / `startupRunner` | 共 16 | 16 | 全覆盖 |
+| `lambda$runBoundaryChain$11` | 4 | 0 | 噪音线程 Runnable，非 main 线程执行 |
+| `TestApplication.main` | 2 | 0 | sandbox 硬编码排除 java main |
+| `OrderController` 的 create/pay/count/audit | 18 | 0 | 仅 HTTP 线程执行 |
+| `OrderService` 的 create/pay/count | 27 | 0 | 仅 HTTP 线程执行 |
+| `PayService.doPay` / `refund` / `<init>` | 15 / 8 / 1 | 0 | 仅 HTTP 线程执行（`<init>` 为默认构造器） |
+| `ProxyTargetService.<init>` / `BoundaryAspect.<init>` | 1 / 1 | 0 | 默认构造器（只有 super() 行） |
+| **合计** | **180** | **95** | **52.8%** |
+
+> 另有一处口径交叉验证：远程 `javap -l -p` 统计的 LineNumberTable 去重行数**合计正好 180**，与表2 `SUM(code_lines)` 完全一致。
+
+### L9 未命中 85 行的逐类归因
+
+| 类别 | 行数 | 具体行 | 依据 |
+| --- | --- | --- | --- |
+| ① 只在 Tomcat 线程执行（本次口径不含） | 68 | Controller 4 方法 18 行；`OrderService.create/pay/count` 27 行；`PayService.doPay/refund` 23 行 | 这些方法只在 HTTP 请求线程被调用；停止 curl 驱动 + `thread.include=main` 后不再产生记录 |
+| ② 构造器首行（`super()`/`this()` 所在行） | 6 | `TestApplication.<init>\|31`、`OrderService.<init>\|23`、`OrderController.<init>\|19`、`PayService.<init>\|9`、`ProxyTargetService.<init>\|17`、`BoundaryAspect.<init>\|13` | sandbox 织入刻意绕开 `super()`/`this()`，其后才有行号事件；**推论：默认构造器（code_lines=1）整方法永不命中**（`PayService`/`ProxyTargetService`/`BoundaryAspect` 三个 `<init>` 即此） |
+| ③ java main 方法被 sandbox 排除 | 2 | `TestApplication.main\|36`、`main\|37` | sandbox 在 matching 阶段硬编码排除 java main（`UnsupportedMatcher.isJavaMainBehavior`），永不织入 |
+| ④ 异常 / 分支路径未执行 | 5 | `printIsolationCheck\|83,84`；`lambda$runBoundaryChain$12\|133,134`；`lambda$auditAll$0\|83` | `printIsolationCheck`：字节码 `73: goto 102` / `76: astore_0` 起为 `catch(Throwable)` 块，`Class.forName` 成功故不走；`λ$runBoundaryChain$12`：Exception table `from 20 to 27 target 30`，133/134 即 `InterruptedException` 的 catch（`Thread.join` 未被打断）；`λ$auditAll$0`：字节码 `31: ifle 38` / `41: ifeq 72`，83 行是 `amount.signum() <= 0` 的 reject 分支，审计金额均为正 |
+| ⑤ 非 main 线程执行（被线程过滤静默放行） | 4 | `lambda$runBoundaryChain$11\|126-129` | 该 lambda 是噪音线程 Runnable（体内打印 `noise thread executing cglib scenario` 并调 `proxiedCall`），不在 main 线程执行；`thread.include=main` 下静默放行 |
+
+### 结论
+
+- **静态上，LNT 的每一行都会被 sandbox 插桩**（`EventWeaver` 对每个 `visitLineNumber` 插 `onLine`）：本轮命中的 95 行**全部落在** javap 统计的 180 行静态集合内，无一条集合外命中；且 javap 总数与 `SUM(code_lines)` 相等。
+- **但 `code_lines` 是「静态可注入行上限」，不是「必然产生故障的行」**。某行是否真的产生表3 记录，取决于四件事：
+  ① 运行时是否执行到（分支 / 异常路径覆盖，如类别 ④）；② 是否落在 sandbox 硬编码排除的方法里（java main，类别 ③）；
+  ③ 是否是被织入绕开的构造器首行（类别 ②，默认构造器因此整方法不可命中）；④ 线程维度（线程过滤或该行只在其他线程执行，类别 ①⑤）。
+- 实践含义：用 `code_lines` 估「本轮最多可能产生多少条故障/需要多少个进程周期」时要按上述四类打折扣；本应用 main 路径实测 95/180。
+
+### 本轮踩坑与还原
+
+| 坑 | 现象 | 处理 |
+| --- | --- | --- |
+| Tomcat 线程名漂移 | 同一行在 `exec-1/2/4/5…` 各命中一次，记录数涨但覆盖率不涨 | 收窄到 main 线程口径（用户决策） |
+| 并行实例端口 | 多实例必须不同 `--server.port` | 8081/8082/8083 |
+| watchdog 无限拉起 | 不主动停会一直重启 | 判停后 `pkill` watchdog + java，并确认无残留 |
+
+- 已还原：module jar 内 `config.yml` 恢复为仓库默认版（验证用的 `inject.filters` 与 `thread.include` 均已移除，仓库模板未改动）；
+  远程临时脚本、`/home/lys/lc-cov`、`/tmp/lclnt` 等临时目录已删除；无残留 java/watchdog 进程；`test-app.jar` 本轮未改动。
+- 数据保留：表3 中 `tag=lc-cov1` 的记录（含前期 Tomcat 线程部分）保留备查，统计时已按 `thread_name='main'` 过滤。
+
