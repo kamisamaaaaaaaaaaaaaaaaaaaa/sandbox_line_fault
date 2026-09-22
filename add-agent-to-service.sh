@@ -15,25 +15,36 @@
 #      前提：service 有 WorkingDirectory=（三行的 tmp 相对它解析，路径零硬编码）；
 #      应用已自带 -Djava.io.tmpdir 时不覆盖，输出提醒人工核对 ExecStopPost 目录
 #   4) 提供第 3 个参数时，写入/替换 -Dfault.tag=<tag>（幂等）；不提供则仅输出提醒
+#   5) 提供第 4 个参数时，替换 RestartSec=<值>（幂等；值限数字与时间单位后缀，如 5 / 5s / 500ms）；
+#      不提供则不修改。故障注入每命中一行都 kill 进程，RestartSec 决定两次故障之间的间隔时间
 #
 # 修改前自动备份为 <service>.bak.<时间戳>；改完需 systemctl daemon-reload + restart 生效。
 set -euo pipefail
 
 usage() {
-    echo "用法: $0 <agentJar绝对路径> <service文件路径> [轮次tag]"
+    echo "用法: $0 <agentJar绝对路径> <service文件路径> [轮次tag] [重启间隔RestartSec]"
     echo "示例: $0 /app/deploy/fault-agent-1.0.0.jar /etc/systemd/system/focus@.service round-001"
+    echo "      $0 /app/deploy/fault-agent-1.0.0.jar /etc/systemd/system/focus@.service round-001 5s"
+    echo "说明: 轮次tag / 重启间隔均可省略；省略重启间隔时不修改 service 中的 RestartSec"
     exit 1
 }
 
-[ $# -ge 2 ] && [ $# -le 3 ] || usage
+[ $# -ge 2 ] && [ $# -le 4 ] || usage
 
 AGENT_JAR="$1"
 SERVICE_FILE="$2"
 TAG="${3:-}"
+RESTART_SEC="${4:-}"
 
 [ -f "$AGENT_JAR" ] || { echo "错误: agent jar 不存在: $AGENT_JAR"; exit 1; }
 [ -f "$SERVICE_FILE" ] || { echo "错误: service 文件不存在: $SERVICE_FILE"; exit 1; }
 [ -w "$SERVICE_FILE" ] || { echo "错误: 无写权限（需要 root 或文件属主）: $SERVICE_FILE"; exit 1; }
+# RestartSec 值格式校验：数字 + 可选时间单位后缀（systemd 支持的写法，如 5 / 5s / 500ms / 1min）；
+# 不允许空格与特殊字符（该值会进入 sed 替换，同时避免写出非法 service）
+if [ -n "$RESTART_SEC" ] && ! printf '%s' "$RESTART_SEC" | grep -Eq '^[0-9]+([a-z]+[0-9]*)*$'; then
+    echo "错误: 非法的 RestartSec 值: $RESTART_SEC（应为数字+可选单位，如 5 / 5s / 500ms / 1min）"
+    exit 1
+fi
 
 AGENT_JAR=$(readlink -f "$AGENT_JAR")
 SERVICE_FILE=$(readlink -f "$SERVICE_FILE")
@@ -110,6 +121,23 @@ if [ -n "$TAG" ]; then
     fi
 fi
 
+# --- 5) 替换 RestartSec（提供了第 4 参数时；幂等）---
+# 值经格式校验后仅含数字与字母，无需额外转义
+RESTART_SEC_APPLIED=0
+if [ -n "$RESTART_SEC" ]; then
+    if grep -Eq '^[[:space:]]*RestartSec=' "$SERVICE_FILE"; then
+        sed -i -E "s|(^[[:space:]]*RestartSec=).*|\1${RESTART_SEC}|" "$SERVICE_FILE"
+        echo "已替换 RestartSec=${RESTART_SEC}"
+        RESTART_SEC_APPLIED=1
+    elif grep -Eq '^[[:space:]]*Restart=' "$SERVICE_FILE"; then
+        sed -i -E "/^[[:space:]]*Restart=/a RestartSec=${RESTART_SEC}" "$SERVICE_FILE"
+        echo "已添加 RestartSec=${RESTART_SEC}（原 service 无该行，插在 Restart= 之后）"
+        RESTART_SEC_APPLIED=1
+    else
+        echo "警告: service 无 RestartSec= 与 Restart= 行，跳过 RestartSec 修改"
+    fi
+fi
+
 # --- 校验写入结果 ---
 if ! grep -Fq -- "-javaagent:${AGENT_JAR}" "$SERVICE_FILE"; then
     echo "错误: -javaagent 修改未生效，已保留备份 $BACKUP"
@@ -119,9 +147,13 @@ if [ -n "$TAG" ] && ! grep -Fq -- "-Dfault.tag=${TAG}" "$SERVICE_FILE"; then
     echo "错误: -Dfault.tag 修改未生效，已保留备份 $BACKUP"
     exit 1
 fi
+if [ "$RESTART_SEC_APPLIED" -eq 1 ] && ! grep -Eq "^[[:space:]]*RestartSec=${RESTART_SEC}[[:space:]]*$" "$SERVICE_FILE"; then
+    echo "错误: RestartSec 修改未生效，已保留备份 $BACKUP"
+    exit 1
+fi
 
 echo "修改完成: $SERVICE_FILE"
-grep -nE '^(StartLimit|ExecStart|ExecStartPre|ExecStopPost)=' "$SERVICE_FILE" || true
+grep -nE '^(StartLimit|ExecStart|ExecStartPre|ExecStopPost|RestartSec)=' "$SERVICE_FILE" || true
 echo
 echo "后续步骤（需 root）："
 echo "  1. systemctl daemon-reload"

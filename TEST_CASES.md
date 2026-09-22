@@ -709,6 +709,27 @@ javac 会把 finally 的代码**复制**到正常路径与异常路径各一份�
 | 并行实例端口 | 多实例必须不同 `--server.port` | 8081/8082/8083 |
 | watchdog 无限拉起 | 不主动停会一直重启 | 判停后 `pkill` watchdog + java，并确认无残留 |
 
+## add-agent-to-service.sh 支持修改 RestartSec（S 系列，2026-09-22）
+
+> 脚本新增第 4 个可选位置参数 `[重启间隔RestartSec]`：提供时替换 service 的 `RestartSec=<值>`
+> （值限「数字+可选时间单位后缀」，如 `5` / `5s` / `500ms` / `1min`，拒绝空格与特殊字符防止 sed 注入）；
+> 不提供则不修改。原 service 无 `RestartSec=` 行但存在 `Restart=` 行时，插入到 `Restart=` 之后；
+> 两者都没有时警告跳过。故障注入每命中一行都 kill 进程，`RestartSec` 决定两次故障之间的间隔时间。
+> 测试环境：129，`focus@.service` 模板副本（不动真实文件）。
+
+| # | 操作 | 预期 | 结果 |
+| --- | --- | --- | --- |
+| S1 | 传第 4 参数 `5s` | `RestartSec=30s` 被替换为 `5s`；-javaagent / -Dfault.tag / 副本清理三行配置不受影响 | ✅ |
+| S2 | 不传第 4 参数 | `RestartSec` 保持原值不变 | ✅ |
+| S3 | 传非法值 `a b`（含空格） | 启动即拒绝（rc=1），service 未被修改 | ✅ |
+| S4 | service 无 `RestartSec=` 行（有 `Restart=`） | 插入 `RestartSec=10s` 到 `Restart=` 之后 | ✅ |
+| S5 | service 无 `RestartSec=` 与 `Restart=` 行 | 警告跳过、正常完成（不再误报"修改未生效"） | ✅ |
+| S6 | 传非法值 `5s;rm`（含分号） | 启动即拒绝 | ✅ |
+
+### 还原
+
+远程测试目录 `/tmp/svc-test` 与测试脚本已删除；`/home/lys/add-agent-to-service.sh` 为新版（该路径即脚本部署位置）。
+
 - 已还原：module jar 内 `config.yml` 恢复为仓库默认版（验证用的 `inject.filters` 与 `thread.include` 均已移除，仓库模板未改动）；
   远程临时脚本、`/home/lys/lc-cov`、`/tmp/lclnt` 等临时目录已删除；无残留 java/watchdog 进程；`test-app.jar` 本轮未改动。
 - 数据保留：表3 中 `tag=lc-cov1` 的记录（含前期 Tomcat 线程部分）保留备查，统计时已按 `thread_name='main'` 过滤。
