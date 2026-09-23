@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # add-agent-to-service.sh — 修改 systemd service 文件以接入故障注入 agent
 #
-# 用法: ./add-agent-to-service.sh <agentJar绝对路径> <service文件路径> [轮次tag]
+# 用法: ./add-agent-to-service.sh <agentJar绝对路径> <service文件路径> <轮次tag> [重启间隔RestartSec] [-D参数...]
 #
 # 做的事：
 #   1) 删除重启次数限制行（StartLimitIntervalSec / StartLimitInterval / StartLimitBurst）
@@ -14,31 +14,72 @@
 #        （KillMode=mixed），清理必须在停止阶段由 ExecStopPost 完成
 #      前提：service 有 WorkingDirectory=（三行的 tmp 相对它解析，路径零硬编码）；
 #      应用已自带 -Djava.io.tmpdir 时不覆盖，输出提醒人工核对 ExecStopPost 目录
-#   4) 提供第 3 个参数时，写入/替换 -Dfault.tag=<tag>（幂等）；不提供则仅输出提醒
-#   5) 提供第 4 个参数时，替换 RestartSec=<值>（幂等；值限数字与时间单位后缀，如 5 / 5s / 500ms）；
+#   4) 写入/替换 -Dfault.tag=<tag>（幂等；**轮次 tag 必填**——agent 硬保护要求，缺失时模块
+#      挂载完成后会直接 kill 进程）
+#   5) 第 5 个参数起为追加/替换的 JVM 参数（可选，数量不限），形如 -Dkey=value 或 key=value
+#      （不带 -D 前缀会自动补上）；ExecStart 已有同名 -Dkey= 时替换其值，否则插到 -jar 之前。
+#      覆盖 Spring 属性的用法：-D 系统属性优先级高于 application.yaml（含 -Dspring.config.location
+#      指定的外部文件）
+#   6) 提供第 4 个参数时，替换 RestartSec=<值>（幂等；值限数字与时间单位后缀，如 5 / 5s / 500ms）；
 #      不提供则不修改。故障注入每命中一行都 kill 进程，RestartSec 决定两次故障之间的间隔时间
 #
 # 修改前自动备份为 <service>.bak.<时间戳>；改完需 systemctl daemon-reload + restart 生效。
 set -euo pipefail
 
 usage() {
-    echo "用法: $0 <agentJar绝对路径> <service文件路径> [轮次tag] [重启间隔RestartSec]"
+    echo "用法: $0 <agentJar绝对路径> <service文件路径> <轮次tag> [重启间隔RestartSec] [-D参数...]"
     echo "示例: $0 /app/deploy/fault-agent-1.0.0.jar /etc/systemd/system/focus@.service round-001"
     echo "      $0 /app/deploy/fault-agent-1.0.0.jar /etc/systemd/system/focus@.service round-001 5s"
-    echo "说明: 轮次tag / 重启间隔均可省略；省略重启间隔时不修改 service 中的 RestartSec"
+    echo "      $0 /app/deploy/fault-agent-1.0.0.jar /etc/systemd/system/focus@.service round-001 5s -Dframework.zk.url=xxx -Dx.y=1"
+    echo "说明: 轮次tag 必填（agent 硬保护要求，缺失时模块挂载完即 kill 进程）；重启间隔可省略"
+    echo "      （省略时不修改 RestartSec）；第 5 个参数起为 JVM 参数（-Dkey=value，可多个），"
+    echo "      ExecStart 已存在的同名参数会被替换"
     exit 1
 }
 
-[ $# -ge 2 ] && [ $# -le 4 ] || usage
+[ $# -ge 3 ] || usage
 
 AGENT_JAR="$1"
 SERVICE_FILE="$2"
-TAG="${3:-}"
-RESTART_SEC="${4:-}"
+TAG="$3"
+shift 3
+
+# 第 4 个剩余参数：若形如 RestartSec 值（数字+可选单位、不以 -D 开头）则视为重启间隔，否则跳过
+RESTART_SEC=""
+if [ $# -gt 0 ]; then
+    case "$1" in
+        -D*) : ;;
+        *)
+            if printf '%s' "$1" | grep -Eq '^[0-9]+([a-z]+[0-9]*)*$'; then
+                RESTART_SEC="$1"
+                shift
+            fi
+            ;;
+    esac
+fi
+
+# 剩余参数：JVM 参数（-Dkey=value 或 key=value，自动补 -D 前缀）。
+# 白名单校验：key 限字母数字与 . _ -；值不允许空格与 shell 特殊字符（& | \ 引号 $ 反引号 分号
+# 等会破坏 ExecStart 或 sed 替换）——含此类字符的值请直接手工编辑 service
+JVM_ARGS=()
+for spec in "$@"; do
+    case "$spec" in
+        -D*) ARG="$spec" ;;
+        *)   ARG="-D$spec" ;;
+    esac
+    if ! printf '%s' "$ARG" | grep -Eq '^-D[A-Za-z0-9._-]+=[A-Za-z0-9._:/=,+@%^*?!~-]*$'; then
+        echo "错误: 非法的 JVM 参数: $spec（应为 -Dkey=value；key 限字母数字._-，"
+        echo "      值不含空格与特殊字符 & | \\ 引号 \$ \` 分号——含此类字符的值请手工编辑 service）"
+        exit 1
+    fi
+    JVM_ARGS+=("$ARG")
+done
 
 [ -f "$AGENT_JAR" ] || { echo "错误: agent jar 不存在: $AGENT_JAR"; exit 1; }
 [ -f "$SERVICE_FILE" ] || { echo "错误: service 文件不存在: $SERVICE_FILE"; exit 1; }
 [ -w "$SERVICE_FILE" ] || { echo "错误: 无写权限（需要 root 或文件属主）: $SERVICE_FILE"; exit 1; }
+# 轮次 tag 必填：agent 硬保护策略要求 JVM 参数带 -Dfault.tag=<轮次标识>，缺失时模块挂载完会 kill 进程
+[ -n "$TAG" ] || { echo "错误: 轮次tag 必填（agent 硬保护要求，缺失时模块挂载完即 kill 进程）"; usage; }
 # RestartSec 值格式校验：数字 + 可选时间单位后缀（systemd 支持的写法，如 5 / 5s / 500ms / 1min）；
 # 不允许空格与特殊字符（该值会进入 sed 替换，同时避免写出非法 service）
 if [ -n "$RESTART_SEC" ] && ! printf '%s' "$RESTART_SEC" | grep -Eq '^[0-9]+([a-z]+[0-9]*)*$'; then
@@ -110,18 +151,33 @@ else
     fi
 fi
 
-# --- 4) ExecStart 写入/替换 -Dfault.tag（提供了第 3 参数时）---
-if [ -n "$TAG" ]; then
-    if grep -Eq '^[[:space:]]*ExecStart=.*-Dfault\.tag=' "$SERVICE_FILE"; then
-        sed -i -E "s|(^[[:space:]]*ExecStart=.*)-Dfault\.tag=[^[:space:]]+|\1-Dfault.tag=${TAG_ESC}|" "$SERVICE_FILE"
-        echo "已替换 ExecStart 中原有的 -Dfault.tag"
-    else
-        sed -i -E "s|(^[[:space:]]*ExecStart=.*-javaagent:[^[:space:]]+)|\1 -Dfault.tag=${TAG_ESC}|" "$SERVICE_FILE"
-        echo "已在 -javaagent 后追加 -Dfault.tag=${TAG}"
-    fi
+# --- 4) ExecStart 写入/替换 -Dfault.tag（轮次 tag 必填）---
+if grep -Eq '^[[:space:]]*ExecStart=.*-Dfault\.tag=' "$SERVICE_FILE"; then
+    sed -i -E "s|(^[[:space:]]*ExecStart=.*)-Dfault\.tag=[^[:space:]]+|\1-Dfault.tag=${TAG_ESC}|" "$SERVICE_FILE"
+    echo "已替换 ExecStart 中原有的 -Dfault.tag"
+else
+    sed -i -E "s|(^[[:space:]]*ExecStart=.*-javaagent:[^[:space:]]+)|\1 -Dfault.tag=${TAG_ESC}|" "$SERVICE_FILE"
+    echo "已在 -javaagent 后追加 -Dfault.tag=${TAG}"
 fi
 
-# --- 5) 替换 RestartSec（提供了第 4 参数时；幂等）---
+# --- 5) 追加/替换用户传入的 JVM 参数（可多个）---
+# 值与 key 已在解析阶段做白名单校验，无需额外转义除 & | 外的字符
+for ARG in "${JVM_ARGS[@]:-}"; do
+    [ -n "$ARG" ] || continue
+    KEY="${ARG#-D}"
+    KEY="${KEY%%=*}"
+    KEY_ESC=$(printf '%s' "$KEY" | sed -e 's/[&|.]/\\&/g')
+    ARG_ESC=$(printf '%s' "$ARG" | sed -e 's/[&|]/\\&/g')
+    if grep -Eq -- "-D${KEY_ESC}=" "$SERVICE_FILE"; then
+        sed -i -E "s|(^[[:space:]]*ExecStart=.*)-D${KEY_ESC}=[^[:space:]]*|\1${ARG_ESC}|" "$SERVICE_FILE"
+        echo "已替换 ExecStart 中原有的 -D${KEY}"
+    else
+        sed -i -E "s|(^[[:space:]]*ExecStart=.*)(-jar )|\1${ARG_ESC} \2|" "$SERVICE_FILE"
+        echo "已在 -jar 前追加 ${ARG}"
+    fi
+done
+
+# --- 6) 替换 RestartSec（提供了第 4 参数时；幂等）---
 # 值经格式校验后仅含数字与字母，无需额外转义
 RESTART_SEC_APPLIED=0
 if [ -n "$RESTART_SEC" ]; then
@@ -151,6 +207,13 @@ if [ "$RESTART_SEC_APPLIED" -eq 1 ] && ! grep -Eq "^[[:space:]]*RestartSec=${RES
     echo "错误: RestartSec 修改未生效，已保留备份 $BACKUP"
     exit 1
 fi
+for ARG in "${JVM_ARGS[@]:-}"; do
+    [ -n "$ARG" ] || continue
+    if ! grep -Fq -- "${ARG}" "$SERVICE_FILE"; then
+        echo "错误: JVM 参数 ${ARG} 修改未生效，已保留备份 $BACKUP"
+        exit 1
+    fi
+done
 
 echo "修改完成: $SERVICE_FILE"
 grep -nE '^(StartLimit|ExecStart|ExecStartPre|ExecStopPost|RestartSec)=' "$SERVICE_FILE" || true
@@ -158,8 +221,3 @@ echo
 echo "后续步骤（需 root）："
 echo "  1. systemctl daemon-reload"
 echo "  2. systemctl restart <服务名>      # 如 focus@app1"
-if [ -z "$TAG" ]; then
-    echo
-    echo "提醒: 未提供轮次 tag —— agent 硬保护策略要求 JVM 参数带 -Dfault.tag=<轮次标识>，"
-    echo "      否则故障模块挂载完成后会直接 kill 进程。重新执行本脚本并传入第 3 个参数即可写入。"
-fi

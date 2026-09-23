@@ -730,6 +730,23 @@ javac 会把 finally 的代码**复制**到正常路径与异常路径各一份�
 
 远程测试目录 `/tmp/svc-test` 与测试脚本已删除；`/home/lys/add-agent-to-service.sh` 为新版（该路径即脚本部署位置）。
 
+### v2：轮次 tag 必填 + 支持多个 JVM 参数（2026-09-22）
+
+> 第 5 个参数起为 JVM 参数（`-Dkey=value` 或 `key=value` 自动补 `-D`），数量不限：ExecStart 已有同名
+> `-Dkey=` 时替换其值，否则插到 `-jar` 之前；值限「字母数字与 `._:/=,+@%^*?!~-`」，拒绝空格与
+> shell 特殊字符（`& | \ 引号 $ 反引号 分号`）防注入。**轮次 tag 改为必填**（agent 硬保护要求，
+> 缺失时模块挂载完即 kill）——原提示把它标为可选是错误的；`RestartSec` 仍为可选。
+
+| # | 操作 | 预期 | 结果 |
+| --- | --- | --- | --- |
+| S7 | 缺 tag（只传 2 参数） | usage 报错 | ✅ |
+| S8 | tag 为空字符串 | 「轮次tag 必填」报错，service 未被修改 | ✅ |
+| S9 | `tag 5s -Dframework.zk.url=xxx -Dconn.timeout=30` | `RestartSec=5s` + 两个 JVM 参数追加到 `-jar` 前 | ✅ |
+| S10 | 同参数重复执行（zk.url 改值） | 替换而非重复追加（`grep -c` = 1） | ✅ |
+| S11 | `-Djava.io.tmpdir=other`（3b 已插过 tmpdir） | 替换其值；3b 的原警告（核对 ExecStopPost 目录）保留 | ✅ |
+| S12 | 不带 `-D` 前缀 `x.y=1`（RestartSec 缺省） | 自动补 `-D` 追加；`RestartSec=30s` 保持不变 | ✅ |
+| S13 | 非法：`-Dnovalue`（无等号）/ 值含空格 / 值含 `$(`、反引号 | 启动即拒绝（白名单报错） | ✅ |
+
 - 已还原：module jar 内 `config.yml` 恢复为仓库默认版（验证用的 `inject.filters` 与 `thread.include` 均已移除，仓库模板未改动）；
   远程临时脚本、`/home/lys/lc-cov`、`/tmp/lclnt` 等临时目录已删除；无残留 java/watchdog 进程；`test-app.jar` 本轮未改动。
 - 数据保留：表3 中 `tag=lc-cov1` 的记录（含前期 Tomcat 线程部分）保留备查，统计时已按 `thread_name='main'` 过滤。
@@ -822,4 +839,35 @@ agent / module 内 `config.yml` 均从备份还原为仓库默认版；`special-
 - **按重载拆分**（默认）：`GROUP BY (class, method, desc_hash)`，分子按表3 `method_desc` 匹配到具体重载；
 - **按方法名合并**：重载行号互不重叠，类 / jar 级合并不重复计数；
 - 分母始终是表2 `code_lines`（含全部重载行）。
+
+## 行级抛异常可行性（X 系列，2026-09-23）
+
+> 背景：行级抛异常方案（见 `PLAN-line-exception-injection.md`）的执行机制选型验证。
+> 载荷：自制 `ThrowTestApp`（`work()` 内 5 个有效行，目标行 = `int len = s.length();`，行号 32），
+> main 循环调用并 catch Throwable，打印 `[CAUGHT] type/msg/at`；业务收到异常 = 注入生效。
+> 模块：一次性测试模块 `ft-throw-test`（`/home/lys/.sandbox-module/`，验证后已删），三种 listener 形态
+> （pce / plain / @Interrupted）按行号命中抛异常，每模式限 3 次。
+> 执行环境：129 正式 sandbox（`/home/lys/sandbox`，1.4.0）；**全部验证完成后 `sandbox-core.jar` 已从备份还原
+>（cmp 一致）、测试目录与模块 jar 已删除、无残留进程**。
+
+| # | 内容 | 预期 | 结果 |
+| --- | --- | --- | --- |
+| X0 | sandbox-core.jar 内含 API 摸底 | fat jar：含 sandbox-api、`com/.../core/enhance/annotation/Interrupted.class`、`javax/annotation/Resource.class`；`Spy` 在独立 `sandbox-spy.jar` | ✅（编译 classpath 用 core+spy 两 jar） |
+| X1 | **模块能否加载 sandbox-core 类**（路线 D 前提） | 未知 → 实测定 | ✅ **不可见**：模块内 `Class.forName("com.alibaba.jvm.sandbox.core.enhance.annotation.Interrupted")` 抛 `ClassNotFoundException`（ModuleJarClassLoader 只暴露 api/common-api，core 类被隔离） |
+| X2 | T1 `beforeLine` 里 `ProcessController.throwsImmediately(ex)`（原生 API，零改动） | 无效（Ret 被 handleOnLine 丢弃） | ✅ 业务全程 `[NORMAL]`（PCE 被 listener 内 catch 后重抛给 sandbox，未传播） |
+| X3 | T2 `beforeLine` 里直接 `throw new RuntimeException`（无 @Interrupted） | 被 `handleEvent` 吞（WARN 日志） | ✅ 业务全程 `[NORMAL]`；sandbox 日志 `event|LINE|...|1008 occur an error` |
+| X4 | T3 listener 带 `@Interrupted`（core 注解） | 异常穿透到业务该行 | ✅ **不成立**：注解类运行期不可见（X1），JVM 解析注解时按定义类 loader 找不到类型即静默丢弃 → `isAnnotationPresent` 恒 false → 异常仍被吞（业务 `[NORMAL]`）。**模块侧自带同名注解类的变体同样不可行**：`Class.isAnnotationPresent` 的注解映射以 `Class` 对象为键，两个 loader 的同名注解类不相等 |
+| X5 | T4 **core 最小补丁**：`EventListenerHandler.handleOnLine` 消费 `Spy.Ret`，`RET_STATE_THROWS` 时 `throw (Throwable) ret.respond`（原版丢弃返回值；补丁 2 行）+ 模块置 `Spy.isSpyThrowException=true`（Spy 在 bootstrap 全局唯一，可直接反射改）+ `ProcessController.throwsImmediately(ex)` | 业务在目标行收到异常，进程存活 | ✅ **成立**：`[CAUGHT ] i=19 type=java.lang.RuntimeException msg=FT-PCE#1`（连续 3 次，seq=1/2/3），进程继续 `[NORMAL]`；注入后无新增 `occur an error`、无 `ERROR process-stack`（异常经方法体 THROWS 桩回调后 rethrow，process stack 平衡） |
+| X6 | 补丁方式 | 单类重编译 + `jar uf` 替换 | ✅ 注意点：补丁类必须保留原版 `getSingleton()`（`SpyUtils.init` 反射依赖，漏掉则 attach 阶段 `NoSuchMethodError`）；连内部类 `EventListenerHandler$1.class` 一并替换 |
+
+### X 系列结论
+
+- **路线 D（`@Interrupted` 穿透）在官方 1.4.0 上不可行**：sandbox 有意对模块隔离 core 类，注解无法被模块侧解析。
+- **路线 B 存在比方案预估更小的形态**：只改 `EventListenerHandler.handleOnLine`（消费 Ret 并 rethrow）一处，
+  **不需要**改 `Spy` 接口、不需要改 `EventWeaver`（异常从 spy 调用点冒出，落点天然就是"该行第一条指令之前"）；
+  配套运行期设置 `Spy.isSpyThrowException=true`（bootstrap 全局唯一，模块反射可改）。
+- **全局开关风险**：`isSpyThrowException=true` 对所有 listener 生效（sandbox 自身模块的异常也会穿透到业务），
+  生产化需评估改为补丁内定向判断（如按 namespace/listenerId 过滤后 rethrow）。
+- 模块侧 API 写法：`beforeLine` 内 `ProcessController.throwsImmediately(ex)`；`ProcessControlException` 是受检异常，
+  `beforeLine` 不声明 throws，需 sneaky-throw 抛出。
 
