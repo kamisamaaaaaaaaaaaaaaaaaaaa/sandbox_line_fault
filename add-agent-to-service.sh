@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # add-agent-to-service.sh — 修改 systemd service 文件以接入故障注入 agent
 #
-# 用法: ./add-agent-to-service.sh <agentJar绝对路径> <service文件路径> <轮次tag> [重启间隔RestartSec] [-D参数...]
+# 用法: ./add-agent-to-service.sh --agent-jar <路径> --service-file <路径> --tag <轮次tag>
+#              [--restart-sec <值>] [--jvm-arg <spec>]...
+# 所有参数均为 key-value 形式（--key value 与 --key=value 两种写法均可），--help 查看每个参数的填法与用途。
 #
 # 做的事：
 #   1) 删除重启次数限制行（StartLimitIntervalSec / StartLimitInterval / StartLimitBurst）
@@ -16,70 +18,125 @@
 #      应用已自带 -Djava.io.tmpdir 时不覆盖，输出提醒人工核对 ExecStopPost 目录
 #   4) 写入/替换 -Dfault.tag=<tag>（幂等；**轮次 tag 必填**——agent 硬保护要求，缺失时模块
 #      挂载完成后会直接 kill 进程）
-#   5) 第 5 个参数起为追加/替换的 JVM 参数（可选，数量不限），形如 -Dkey=value 或 key=value
+#   5) --jvm-arg 为追加/替换的 JVM 参数（可选，可重复传多个），形如 -Dkey=value 或 key=value
 #      （不带 -D 前缀会自动补上）；ExecStart 已有同名 -Dkey= 时替换其值，否则插到 -jar 之前。
 #      覆盖 Spring 属性的用法：-D 系统属性优先级高于 application.yaml（含 -Dspring.config.location
 #      指定的外部文件）
-#   6) 提供第 4 个参数时，替换 RestartSec=<值>（幂等；值限数字与时间单位后缀，如 5 / 5s / 500ms）；
+#   6) 提供 --restart-sec 时，替换 RestartSec=<值>（幂等；值限数字与时间单位后缀，如 5 / 5s / 500ms）；
 #      不提供则不修改。故障注入每命中一行都 kill 进程，RestartSec 决定两次故障之间的间隔时间
 #
 # 修改前自动备份为 <service>.bak.<时间戳>；改完需 systemctl daemon-reload + restart 生效。
 set -euo pipefail
 
-usage() {
-    echo "用法: $0 <agentJar绝对路径> <service文件路径> <轮次tag> [重启间隔RestartSec] [-D参数...]"
-    echo "示例: $0 /app/deploy/fault-agent-1.0.0.jar /etc/systemd/system/focus@.service round-001"
-    echo "      $0 /app/deploy/fault-agent-1.0.0.jar /etc/systemd/system/focus@.service round-001 5s"
-    echo "      $0 /app/deploy/fault-agent-1.0.0.jar /etc/systemd/system/focus@.service round-001 5s -Dframework.zk.url=xxx -Dx.y=1"
-    echo "说明: 轮次tag 必填（agent 硬保护要求，缺失时模块挂载完即 kill 进程）；重启间隔可省略"
-    echo "      （省略时不修改 RestartSec）；第 5 个参数起为 JVM 参数（-Dkey=value，可多个），"
-    echo "      ExecStart 已存在的同名参数会被替换"
+err() {
+    echo "错误: $1" >&2
+    echo "运行 $0 --help 查看参数说明" >&2
     exit 1
 }
 
-[ $# -ge 3 ] || usage
+usage() {
+    cat <<'EOF'
+用法: add-agent-to-service.sh --agent-jar <路径> --service-file <路径> --tag <轮次tag>
+                 [--restart-sec <值>] [--jvm-arg <spec>]...
 
-AGENT_JAR="$1"
-SERVICE_FILE="$2"
-TAG="$3"
-shift 3
+所有参数均为 key-value 形式，以下两种写法等价：
+  --agent-jar /path/to.jar
+  --agent-jar=/path/to.jar
 
-# 第 4 个剩余参数：若形如 RestartSec 值（数字+可选单位、不以 -D 开头）则视为重启间隔，否则跳过
-RESTART_SEC=""
-if [ $# -gt 0 ]; then
-    case "$1" in
-        -D*) : ;;
-        *)
-            if printf '%s' "$1" | grep -Eq '^[0-9]+([a-z]+[0-9]*)*$'; then
-                RESTART_SEC="$1"
-                shift
-            fi
-            ;;
-    esac
-fi
+参数说明:
 
-# 剩余参数：JVM 参数（-Dkey=value 或 key=value，自动补 -D 前缀）。
-# 白名单校验：key 限字母数字与 . _ -；值不允许空格与 shell 特殊字符（& | \ 引号 $ 反引号 分号
-# 等会破坏 ExecStart 或 sed 替换）——含此类字符的值请直接手工编辑 service
+  --agent-jar <绝对路径>    必填
+      填法: fault-agent jar 在目标机器上的绝对路径（建议 readlink -f 解析后的真实路径）
+      用途: 在 ExecStart 的 java 命令中插入/替换 -javaagent:<该路径>。已存在 -javaagent 则整体
+            替换（幂等，连同原有 agentArgs）；旧的 -javaagent= 等号写法（JVM 非法参数）会被
+            一并纠正为冒号写法
+
+  --service-file <路径>     必填
+      填法: systemd service 文件路径，如 /etc/systemd/system/focus@.service
+      用途: 被修改的目标文件。需要 root 或文件属主写权限；修改前自动备份为
+            <service>.bak.<时间戳>；改完需 systemctl daemon-reload + restart 才生效
+
+  --tag <轮次tag>           必填
+      填法: 本轮演练的轮次标识，如 round-001（建议只用字母、数字与 - _ .）
+      用途: 写入 ExecStart 的 -Dfault.tag=<tag>。agent 硬保护策略要求该参数必填，
+            缺失时模块挂载完成后会直接 kill 进程
+
+  --restart-sec <值>        可选，缺省不修改
+      填法: 数字 + 可选时间单位后缀，如 5 / 5s / 500ms / 1min
+      用途: 替换 service 中的 RestartSec=<值>（原文件没有该行时插在 Restart= 之后）。
+            故障注入每命中一行都会 kill 进程，RestartSec 决定两次故障之间的间隔时间
+
+  --jvm-arg <spec>          可选，可重复传入多个
+      填法: -Dkey=value 或 key=value（自动补 -D 前缀）；key 限字母数字与 . _ -；
+            值不允许空格与 shell 特殊字符（& | \ 引号 $ 反引号 分号等会破坏 ExecStart 或
+            sed 替换）——含此类字符的值请直接手工编辑 service
+      用途: 追加/替换 ExecStart 中的 JVM 参数：已有同名 -Dkey= 则替换其值（幂等），
+            否则插到 -jar 之前。-D 系统属性优先级高于 application.yaml（含
+            -Dspring.config.location 指定的外部文件），可借此覆盖 Spring 配置
+
+  --help, -h                显示本说明并退出
+
+示例:
+  # 最简：只接 agent + 轮次 tag
+  ./add-agent-to-service.sh --agent-jar /app/deploy/fault-agent-1.0.0.jar \
+      --service-file /etc/systemd/system/focus@.service --tag round-001
+
+  # 指定重启间隔
+  ./add-agent-to-service.sh --agent-jar /app/deploy/fault-agent-1.0.0.jar \
+      --service-file /etc/systemd/system/focus@.service --tag round-001 --restart-sec 5s
+
+  # 追加/覆盖 JVM 参数（可多个，--jvm-arg 重复出现即可）
+  ./add-agent-to-service.sh --agent-jar /app/deploy/fault-agent-1.0.0.jar \
+      --service-file /etc/systemd/system/focus@.service --tag round-001 --restart-sec 5s \
+      --jvm-arg framework.zk.url=xxx --jvm-arg -Dx.y=1
+EOF
+    exit 0
+}
+
+AGENT_JAR=""; SERVICE_FILE=""; TAG=""; RESTART_SEC=""
 JVM_ARGS=()
-for spec in "$@"; do
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -h|--help)        usage ;;
+        --agent-jar=*)    AGENT_JAR="${1#*=}";    shift ;;
+        --agent-jar)      [ $# -ge 2 ] || err "--agent-jar 缺少值";    AGENT_JAR="$2";    shift 2 ;;
+        --service-file=*) SERVICE_FILE="${1#*=}"; shift ;;
+        --service-file)   [ $# -ge 2 ] || err "--service-file 缺少值"; SERVICE_FILE="$2"; shift 2 ;;
+        --tag=*)          TAG="${1#*=}";          shift ;;
+        --tag)            [ $# -ge 2 ] || err "--tag 缺少值";          TAG="$2";          shift 2 ;;
+        --restart-sec=*)  RESTART_SEC="${1#*=}";  shift ;;
+        --restart-sec)    [ $# -ge 2 ] || err "--restart-sec 缺少值";  RESTART_SEC="$2";  shift 2 ;;
+        --jvm-arg=*)      JVM_ARGS+=("${1#*=}");  shift ;;
+        --jvm-arg)        [ $# -ge 2 ] || err "--jvm-arg 缺少值";      JVM_ARGS+=("$2");  shift 2 ;;
+        *)                err "未知参数: $1" ;;
+    esac
+done
+
+[ -n "$AGENT_JAR" ]    || err "缺少必填参数 --agent-jar"
+[ -n "$SERVICE_FILE" ] || err "缺少必填参数 --service-file"
+# 轮次 tag 必填：agent 硬保护策略要求 JVM 参数带 -Dfault.tag=<轮次标识>，缺失时模块挂载完会 kill 进程
+[ -n "$TAG" ]          || err "缺少必填参数 --tag（agent 硬保护要求，缺失时模块挂载完即 kill 进程）"
+
+# --jvm-arg 白名单校验：key 限字母数字与 . _ -；值不允许空格与 shell 特殊字符（& | \ 引号 $
+# 反引号 分号等会破坏 ExecStart 或 sed 替换）——含此类字符的值请直接手工编辑 service
+JVM_ARGS_CLEAN=()
+for spec in "${JVM_ARGS[@]:-}"; do
+    [ -n "$spec" ] || continue
     case "$spec" in
         -D*) ARG="$spec" ;;
         *)   ARG="-D$spec" ;;
     esac
     if ! printf '%s' "$ARG" | grep -Eq '^-D[A-Za-z0-9._-]+=[A-Za-z0-9._:/=,+@%^*?!~-]*$'; then
-        echo "错误: 非法的 JVM 参数: $spec（应为 -Dkey=value；key 限字母数字._-，"
-        echo "      值不含空格与特殊字符 & | \\ 引号 \$ \` 分号——含此类字符的值请手工编辑 service）"
-        exit 1
+        err "非法的 JVM 参数: $spec（应为 -Dkey=value；key 限字母数字._-，值不含空格与特殊字符 & | \\ 引号 \$ \` 分号）"
     fi
-    JVM_ARGS+=("$ARG")
+    JVM_ARGS_CLEAN+=("$ARG")
 done
+JVM_ARGS=("${JVM_ARGS_CLEAN[@]:-}")
 
 [ -f "$AGENT_JAR" ] || { echo "错误: agent jar 不存在: $AGENT_JAR"; exit 1; }
 [ -f "$SERVICE_FILE" ] || { echo "错误: service 文件不存在: $SERVICE_FILE"; exit 1; }
 [ -w "$SERVICE_FILE" ] || { echo "错误: 无写权限（需要 root 或文件属主）: $SERVICE_FILE"; exit 1; }
-# 轮次 tag 必填：agent 硬保护策略要求 JVM 参数带 -Dfault.tag=<轮次标识>，缺失时模块挂载完会 kill 进程
-[ -n "$TAG" ] || { echo "错误: 轮次tag 必填（agent 硬保护要求，缺失时模块挂载完即 kill 进程）"; usage; }
 # RestartSec 值格式校验：数字 + 可选时间单位后缀（systemd 支持的写法，如 5 / 5s / 500ms / 1min）；
 # 不允许空格与特殊字符（该值会进入 sed 替换，同时避免写出非法 service）
 if [ -n "$RESTART_SEC" ] && ! printf '%s' "$RESTART_SEC" | grep -Eq '^[0-9]+([a-z]+[0-9]*)*$'; then
