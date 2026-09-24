@@ -161,6 +161,13 @@ final class KillAdviceListener extends AdviceListener {
         } catch (Throwable t) {
             // 任何异常（含 DB 不可用）：记表4 后按硬保护 kill —— 故障工具宁可不放行，
             // 也不能让一个"已注入但可能不生效"的进程继续运行
+            // 诊断行：定位 NoSuchMethodException 类问题——对比事件捕获的 loader 与线程上下文 loader
+            // 的实际类型（是应用 LaunchedURLClassLoader、sandbox 自身回退 loader，还是框架自定义 loader），
+            // 仅异常路径执行，热路径零开销
+            FaultLogger.warn("beforeLine-diag: line=" + lineNum
+                    + " eventLoader=" + loaderOf(advice.getLoader())
+                    + " tccl=" + loaderOf(Thread.currentThread().getContextClassLoader())
+                    + " cause=" + t.getClass().getName());
             FaultLogger.error("beforeLine handling failed, kill process per policy: " + lineKey, t);
             recordError("beforeLine failed: " + t.getMessage(), lineKey, t);
             if (!KillUtil.killCurrentProcess(pid)) {
@@ -217,6 +224,12 @@ final class KillAdviceListener extends AdviceListener {
         java.io.StringWriter sw = new java.io.StringWriter();
         t.printStackTrace(new java.io.PrintWriter(sw));
         return sw.toString();
+    }
+
+    /** 诊断用：loader 的紧凑身份（类型 + 实例哈希），区分同类 loader 的多个实例；null 原样标注 */
+    private static String loaderOf(ClassLoader l) {
+        return l == null ? "null"
+                : l.getClass().getName() + "@" + Integer.toHexString(System.identityHashCode(l));
     }
 
     /**
