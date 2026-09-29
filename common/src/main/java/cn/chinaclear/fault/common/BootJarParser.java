@@ -67,8 +67,11 @@ public final class BootJarParser {
         try (ZipFile zip = new ZipFile(bootJar.toFile())) {
             // 1) BOOT-INF/classes 整体一个单元：开关（enabled）AND 内容过滤（content-filter）都通过才解析
             if (filter.classesEnabled) {
+                // 开关关闭时不编译：未生效的配置不该因非法正则拖垮本轮（与 libs 侧一致）
+                Pattern[] classesPatterns =
+                        RegexPatterns.compile(filter.classesContentFilter, "parse.classes.content-filter");
                 List<String> classEntries = JarHashUtil.listClassesEntries(zip);
-                if (classesContentMatch(classEntries, filter)) {
+                if (classesContentMatch(classEntries, classesPatterns)) {
                     String classesHash = JarHashUtil.sha256OfClassesDir(bootJar);
                     UnitSink classesSink =
                             handler.beginUnit(UNIT_CLASSES, bootJar.getFileName().toString(), classesHash);
@@ -83,15 +86,15 @@ public final class BootJarParser {
                 } else {
                     // 整个单元滤空：连 hash 计算一并省掉（它要遍历整个 classes 目录，不省就白算）
                     FaultLogger.info("classes unit skipped by content-filter: no .class entry matches"
-                            + " parse.classes.content-filter=" + filter.classesEntries);
+                            + " parse.classes.content-filter=" + filter.classesContentFilter);
                 }
             } else {
                 FaultLogger.info("classes unit skipped: parse.classes.enabled=false");
             }
 
             // 2) BOOT-INF/lib 单元：名字白名单 AND 内容过滤（正则各预编译一次，避免每个 jar 重复编译）
-            Pattern[] whitelistPatterns = RegexPatterns.compile(filter.libWhitelist, "parse.libs.whitelist");
-            Pattern[] contentPatterns = RegexPatterns.compile(filter.libEntries, "parse.libs.content-filter");
+            Pattern[] whitelistPatterns = RegexPatterns.compile(filter.libsWhitelist, "parse.libs.whitelist");
+            Pattern[] contentPatterns = RegexPatterns.compile(filter.libsContentFilter, "parse.libs.content-filter");
             int skippedByWhitelist = 0;
             int skippedByContent = 0;
             for (Enumeration<? extends ZipEntry> en = zip.entries(); en.hasMoreElements(); ) {
@@ -141,12 +144,11 @@ public final class BootJarParser {
         }
     }
 
-    /** classes 内容过滤：任一 .class 条目的相对路径命中任一条件即 true；过滤为空恒 true */
-    private static boolean classesContentMatch(List<String> classEntries, ParseFilter filter) {
-        if (filter.classesEntries.isEmpty()) {
+    /** classes 内容过滤：任一 .class 条目的相对路径命中任一条件即 true；过滤为空（空数组）恒 true */
+    private static boolean classesContentMatch(List<String> classEntries, Pattern[] patterns) {
+        if (patterns.length == 0) {
             return true;
         }
-        Pattern[] patterns = RegexPatterns.compile(filter.classesEntries, "parse.classes.content-filter");
         for (String name : classEntries) {
             if (RegexPatterns.matchesAny(patterns, relativeClassesName(name))) {
                 return true;

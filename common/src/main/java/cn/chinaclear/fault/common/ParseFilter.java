@@ -12,20 +12,20 @@ import java.util.List;
  */
 public final class ParseFilter {
 
-    /** 是否解析 BOOT-INF/classes 单元（名字维度开关，原 parse.classes.enabled） */
+    /** 是否解析 BOOT-INF/classes 单元（开关维度，原 parse.classes.enabled） */
     public final boolean classesEnabled;
     /** classes 内容过滤正则原文（对 classes 下 .class 条目相对路径全串匹配）；空 = 不限制 */
-    public final List<String> classesEntries;
+    public final List<String> classesContentFilter;
     /** libs 名字过滤正则原文（对 jar 文件名全串匹配，原 lib.whitelist） */
-    public final List<String> libWhitelist;
+    public final List<String> libsWhitelist;
     /** libs 内容过滤正则原文（对 jar 内每个条目完整路径全串匹配）；空 = 不限制 */
-    public final List<String> libEntries;
+    public final List<String> libsContentFilter;
 
-    public ParseFilter(boolean classesEnabled, List<String> classesEntries,
-                       List<String> libWhitelist, List<String> libEntries) {
+    public ParseFilter(boolean classesEnabled, List<String> classesContentFilter,
+                       List<String> libsWhitelist, List<String> libsContentFilter) {
         this.classesEnabled = classesEnabled;
-        this.classesEntries = classesEntries;
-        this.libWhitelist = libWhitelist;
-        this.libEntries = libEntries;
+        this.classesContentFilter = classesContentFilter;
+        this.libsWhitelist = libsWhitelist;
+        this.libsContentFilter = libsContentFilter;
     }
 }
