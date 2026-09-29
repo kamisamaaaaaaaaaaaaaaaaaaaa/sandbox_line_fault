@@ -23,20 +23,31 @@ sandbox:
 
 # ========== 以下均为可选配置（有默认值），按需取消注释并修改 ==========
 
-# lib:
-#   # BOOT-INF/lib 第三方白名单：正则表达式（对 jar 文件名全串匹配），一行一个（"- " 开头）
-#   # 默认值：空列表 = 不解析任何 lib（只解析 BOOT-INF/classes/）
-#   # 正则中的 . 是通配符，表示字面量点请写 \.
-#   whitelist:
-#     - test-lib.*
-
 # parse:
-#   # 是否解析 BOOT-INF/classes（应用自身代码）
-#   #   true（默认）= 应用代码与第三方 lib 都解析
-#   #   false        = 只解析 lib.whitelist 命中的第三方 jar，应用代码既不解析也不注入故障
-#   # 置为 false 且白名单未匹配到任何 jar 时，本轮解析单元为空 → 硬保护 PARSE
 #   classes:
+#     # 是否解析 BOOT-INF/classes（应用自身代码）
+#     #   true（默认）= 应用代码与第三方 lib 都解析
+#     #   false        = 只解析 libs 双重过滤命中的第三方 jar，应用代码既不解析也不注入故障
+#     # 置为 false 且 lib 也未匹配到任何解析单元时，本轮解析单元为空 → 硬保护 PARSE
 #     enabled: true
+#     # BOOT-INF/classes 内容过滤：正则表达式（对 classes 下 .class 条目相对路径全串匹配），
+#     # 任一条件命中才解析整个 classes 单元；不配置 = 不限制。
+#     # 目录本身不单独成条目，目录匹配请写「包路径/.*」（如 cn/example/service/.*）
+#     content-filter:
+#       - cn/example/service/.*
+#   libs:
+#     # BOOT-INF/lib 第三方白名单（名字维度）：正则表达式（对 jar 文件名全串匹配），一行一个（"- " 开头）
+#     # 默认值：空列表 = 不解析任何 lib（只解析 BOOT-INF/classes/）
+#     # 正则中的 . 是通配符，表示字面量点请写 \.
+#     # 旧键 lib.whitelist 已废弃：写了会启动即报错，请改用本层级
+#     whitelist:
+#       - test-lib.*
+#     # BOOT-INF/lib 内容过滤（内容维度）：正则表达式（对 jar 内每个条目的完整路径全串匹配，
+#     # 目录条目以 / 结尾），任一条件命中即解析该 jar；不配置 = 不限制。
+#     # 与 whitelist 是 AND 关系：两个维度都通过才解析
+#     content-filter:
+#       - com/example/marker/.*
+#       - META-INF/spring\.factories
 #   # 解析阶段超时（定位 bootJar 后的登记+解析+落库，含异机 pending 等待），毫秒
 #   # 默认值：900000（15 分钟）
 #   timeout:

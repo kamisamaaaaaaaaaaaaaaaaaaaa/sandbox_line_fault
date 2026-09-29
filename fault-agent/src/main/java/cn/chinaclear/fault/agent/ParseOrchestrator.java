@@ -5,6 +5,7 @@ import cn.chinaclear.fault.common.FaultConfig;
 import cn.chinaclear.fault.common.FaultLogger;
 import cn.chinaclear.fault.common.JdbcHelper;
 import cn.chinaclear.fault.common.MachineInfo;
+import cn.chinaclear.fault.common.ParseFilter;
 import cn.chinaclear.fault.common.dao.ClassMethodDao;
 import cn.chinaclear.fault.common.dao.ErrorRecordDao;
 import cn.chinaclear.fault.common.dao.JarRecordDao;
@@ -42,8 +43,10 @@ final class ParseOrchestrator {
         List<Long> unitIds = new ArrayList<>();
 
         try {
-            BootJarParser.parse(java.nio.file.Paths.get(bootJarPath), config.parseClassesEnabled(),
-                    config.libWhitelist(), (unitType, sourceJar, sha256) -> {
+            ParseFilter filter = new ParseFilter(config.parseClassesEnabled(), config.classesContentFilter(),
+                    config.libsWhitelist(), config.libsContentFilter());
+            BootJarParser.parse(java.nio.file.Paths.get(bootJarPath), filter,
+                    (unitType, sourceJar, sha256) -> {
                         checkDeadline(deadline, bootJarPath);
                         UnitRegistration reg = registerUnit(recordDao, unitType, sha256, sourceJar, bootJarPath);
                         unitIds.add(reg.unitId);
@@ -63,16 +66,20 @@ final class ParseOrchestrator {
                     AgentBootstrap.stackOf(e), null, bootJarPath);
         }
         if (unitIds.isEmpty()) {
-            // 本轮一个解析单元都没有：典型原因是关闭了 classes 解析、而 lib 白名单又没匹配到任何 jar。
+            // 本轮一个解析单元都没有：classes 被关闭/滤空、lib 又被白名单+内容过滤全部挡下。
             // 此时继续启动会得到一个「挂载了但零覆盖」的空跑进程，绝不放行。
             throw HardProtectException.exception("PARSE",
                     "no parse unit for this round: parse.classes.enabled=" + config.parseClassesEnabled()
-                            + ", lib.whitelist=" + config.libWhitelist()
-                            + "（两者不可同时为空：请至少保留 classes 解析或让白名单匹配到 jar）",
+                            + ", parse.classes.content-filter=" + config.classesContentFilter()
+                            + ", parse.libs.whitelist=" + config.libsWhitelist()
+                            + ", parse.libs.content-filter=" + config.libsContentFilter()
+                            + "（过滤后至少要保留一个解析单元：classes 或某个 lib jar）",
                     null, null, bootJarPath);
         }
         FaultLogger.info("parse units: count=" + unitIds.size() + " ids=" + unitIds
-                + "（classes=" + config.parseClassesEnabled() + "）");
+                + "（classes=" + config.parseClassesEnabled()
+                + ", libs.content-filter=" + config.libsContentFilter().size() + " 条"
+                + ", classes.content-filter=" + config.classesContentFilter().size() + " 条）");
         return unitIds;
     }
 

@@ -154,8 +154,10 @@ agent 启动时只校验表与列是否存在，**不会自动建表或加列**�
 | `jdbc.password` | 是 | — | 数据库密码 |
 | `jdbc.driver` | 是 | — | **JDBC 驱动的标准类名**（如 `com.mysql.cj.jdbc.Driver`），与 module 侧写法一致。无内置兜底，加载失败即硬保护。见 [5.7](#57-agent-隔离类加载嵌套-jar) |
 | `sandbox.home` | `mount.enabled=true` 时必填 | — | sandbox 安装目录（取其 `bin/sandbox.sh`）。缺失在解析开始前即硬保护，不会白跑解析 |
-| `parse.classes.enabled` | 否 | **`true`** | 是否解析 `BOOT-INF/classes/`（应用自身代码）。`false` = 只解析 `lib.whitelist` 命中的第三方 jar，应用代码既不解析也不注入故障。见 [5.5](#55-解析范围与注入范围) |
-| `lib.whitelist` | 否 | **空列表**（不解析任何 lib） | `BOOT-INF/lib/` 中需要解析的 jar 文件名，正则表达式（对文件名全串匹配），YAML 列表一行一个 |
+| `parse.classes.enabled` | 否 | **`true`** | 是否解析 `BOOT-INF/classes/`（应用自身代码）。`false` = 只解析 `parse.libs.whitelist` + `parse.libs.content-filter` 双重命中的第三方 jar，应用代码既不解析也不注入故障。见 [5.5](#55-解析范围与注入范围) |
+| `parse.classes.content-filter` | 否 | **空**（不限制） | `BOOT-INF/classes/` 内容过滤：正则列表（对 classes 下 `.class` 条目相对路径全串匹配），任一条件命中才解析整个 classes 单元。目录不单独成条目，目录匹配写「包路径/.*」 |
+| `parse.libs.whitelist` | 否 | **空列表**（不解析任何 lib） | `BOOT-INF/lib/` 中需要解析的 jar 文件名（名字维度），正则表达式（对文件名全串匹配），YAML 列表一行一个。旧键 `lib.whitelist` 已废弃，写了启动即报错 |
+| `parse.libs.content-filter` | 否 | **空**（不限制） | lib jar 内容过滤（内容维度）：正则列表（对 jar 内每个条目完整路径全串匹配，目录条目以 `/` 结尾），任一条件命中即解析该 jar。与 whitelist 是 AND 关系 |
 | `mount.enabled` | 否 | **`true`** | `false` = 纯解析模式（只落库，应用正常启动，不挂载不注入） |
 | `parse.timeout.ms` | 否 | **`900000`**（15 分钟） | 解析阶段总预算：登记+解析+落库，超时即硬保护 |
 | `mount.timeout.ms` | 否 | **`1200000`**（20 分钟） | 挂载阶段超时，与解析阶段各自独立计时 |
@@ -183,7 +185,7 @@ agent 启动时只校验表与列是否存在，**不会自动建表或加列**�
 
 ### 5.4 正则写法
 
-`lib.whitelist` 与 `inject.filters` 下的 `libs` / `include` / `exclude` 规则相同：
+`parse.libs.whitelist` / `parse.classes.content-filter` / `parse.libs.content-filter` 与 `inject.filters` 下的 `libs` / `include` / `exclude` 规则相同：
 
 - 均为 **Java 正则，全串匹配**；`.` 是通配符，表示字面量的点请写 `\.`（不转义也能匹配，但会放宽，如 `OrderService` 会连 `OrderXService` 一起匹配）。
 - 名单一律写成一行一个 `- ` 开头的 YAML 列表。减号与值之间的空格数量、值首尾空白都不影响解析（读取时会 trim）。缩进只要求同层一致，**不可用 Tab**。
@@ -205,10 +207,12 @@ agent 启动时只校验表与列是否存在，**不会自动建表或加列**�
 ### 5.5 解析范围与注入范围
 
 **解析范围**（agent 侧）。解析单元分两类：`BOOT-INF/classes/` 整体一个单元（应用自身代码），
-`BOOT-INF/lib/` 中命中 `lib.whitelist` 的每个 jar 各一个单元（第三方依赖）。
+`BOOT-INF/lib/` 中通过「`parse.libs.whitelist`（名字）AND `parse.libs.content-filter`（内容）」双重过滤的每个 jar 各一个单元（第三方依赖）。
 
 - `parse.classes.enabled: false` 时 classes 单元不再解析（连它的哈希计算一并跳过），应用代码既不落表2 也不注入故障——对应"只对第三方组件做故障演练"的场景。
-- **该开关与白名单不可同时为空**：若关闭了 classes 解析、`lib.whitelist` 又没匹配到任何 jar，本轮一个解析单元都没有，直接硬保护 `PARSE`。不放行"挂载了却零覆盖"的进程。
+- classes 单元还可配 `parse.classes.content-filter`（内容维度）：classes 下没有任何 `.class` 条目相对路径命中条件时，**整个 classes 单元跳过**（同样不计算哈希），lib 单元不受影响照常解析。
+- **过滤后至少要保留一个解析单元**：classes 被关闭/滤空、lib 又没匹配到任何 jar（或全被内容过滤挡下）时，本轮一个解析单元都没有，直接硬保护 `PARSE`。不放行"挂载了却零覆盖"的进程。
+- 被过滤的单元会打印跳过汇总（classes 滤空一条 INFO；lib 按 whitelist / content-filter 分开计数），不会逐 jar 刷屏。
 - classes 单元关闭后，表1 里历史遗留的 CLASSES 单元行仍然存在，只是不在本轮单元清单里，模块不会注入它。本轮生效的单元清单会打印为 `unit: id=... type=... source=...`。
 
 **注入范围**（module 侧）。解析落表2 是全量的，过滤只作用于注入阶段（注册 watch 前）。
@@ -245,7 +249,7 @@ inject:
 |---|---|---|
 | `global` | 全部已解析方法 | — |
 | `class` | `BOOT-INF/classes/` 的应用自身代码 | — |
-| `lib` | 第三方 jar | `libs`：jar 文件名正则全串匹配（与 `lib.whitelist` 同构） |
+| `lib` | 第三方 jar | `libs`：jar 文件名正则全串匹配（与 `parse.libs.whitelist` 同构） |
 
 由此：范围互斥的块（`class` 与 `lib`）互不表态、各自管各自；范围重叠的块（`global` 与 `class`）需逐块过关。
 
@@ -272,10 +276,9 @@ sandbox:
 parse:
   classes:
     enabled: false
-
-lib:
-  whitelist:
-    - 'test-lib-.*\.jar'
+  libs:
+    whitelist:
+      - 'test-lib-.*\.jar'
 
 inject:
   filters:

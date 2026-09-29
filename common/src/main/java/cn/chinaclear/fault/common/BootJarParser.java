@@ -22,7 +22,7 @@ import java.util.zip.ZipInputStream;
 /**
  * bootJar 解析器（流式，不把全量方法驻留内存）：
  * 1) BOOT-INF/classes/ 整体一个解析单元（hash = 条目聚合；可由 parse.classes.enabled=false 关闭）；
- * 2) BOOT-INF/lib/ 中命中白名单的每个 jar 各一个单元（hash = 字节流）；
+ * 2) BOOT-INF/lib/ 中通过「名字白名单 AND 内容过滤」双重过滤的每个 jar 各一个单元（hash = 字节流）；
  *
  * 每解析到一个单元先回调 {@link UnitHandler#beginUnit}：
  * 返回 sink 则开始流式解析该类内容（方法逐条 push，由调用方按批写库）；
@@ -57,36 +57,43 @@ public final class BootJarParser {
     }
 
     /**
-     * 解析 bootJar：classes 单元（可关闭）+ 全部白名单命中的 lib 单元（流式回调）。
+     * 解析 bootJar：classes 单元（可关闭）+ 双重过滤命中的 lib 单元（流式回调）。
+     * 两类单元的名字维度与内容维度均为 AND；内容过滤未配置 = 不限制（行为与引入前一致）。
      *
-     * @param parseClasses 是否解析 BOOT-INF/classes（应用自身代码）；false 时连该单元的
-     *                     哈希计算一并跳过（它要遍历整个 classes 目录，不跳过就白算），
-     *                     应用代码既不解析也不注入故障
-     * @param whitelist   BOOT-INF/lib 白名单正则（对 jar 文件名全串匹配）；非法即抛，
-     *                    由上层 ParseOrchestrator 的 catch(RuntimeException) 转硬保护 PARSE
+     * @param filter 两类单元的过滤配置（见 {@link ParseFilter}）；其中的正则非法即抛，
+     *               由上层 ParseOrchestrator 的 catch(RuntimeException) 转硬保护 PARSE
      */
-    public static void parse(Path bootJar, boolean parseClasses, List<String> whitelist,
-                             UnitHandler handler) {
+    public static void parse(Path bootJar, ParseFilter filter, UnitHandler handler) {
         try (ZipFile zip = new ZipFile(bootJar.toFile())) {
-            // 1) BOOT-INF/classes 整体一个单元
-            if (parseClasses) {
-                String classesHash = JarHashUtil.sha256OfClassesDir(bootJar);
-                UnitSink classesSink =
-                        handler.beginUnit(UNIT_CLASSES, bootJar.getFileName().toString(), classesHash);
-                if (classesSink != null) {
-                    for (String name : JarHashUtil.listClassesEntries(zip)) {
-                        try (InputStream in = zip.getInputStream(zip.getEntry(name))) {
-                            parseClass(in, name, classesSink);
+            // 1) BOOT-INF/classes 整体一个单元：开关（enabled）AND 内容过滤（content-filter）都通过才解析
+            if (filter.classesEnabled) {
+                List<String> classEntries = JarHashUtil.listClassesEntries(zip);
+                if (classesContentMatch(classEntries, filter)) {
+                    String classesHash = JarHashUtil.sha256OfClassesDir(bootJar);
+                    UnitSink classesSink =
+                            handler.beginUnit(UNIT_CLASSES, bootJar.getFileName().toString(), classesHash);
+                    if (classesSink != null) {
+                        for (String name : classEntries) {
+                            try (InputStream in = zip.getInputStream(zip.getEntry(name))) {
+                                parseClass(in, name, classesSink);
+                            }
                         }
+                        classesSink.finish();
                     }
-                    classesSink.finish();
+                } else {
+                    // 整个单元滤空：连 hash 计算一并省掉（它要遍历整个 classes 目录，不省就白算）
+                    FaultLogger.info("classes unit skipped by content-filter: no .class entry matches"
+                            + " parse.classes.content-filter=" + filter.classesEntries);
                 }
             } else {
                 FaultLogger.info("classes unit skipped: parse.classes.enabled=false");
             }
 
-            // 2) BOOT-INF/lib 白名单单元（正则预编译一次，避免每个 jar 重复编译）
-            Pattern[] whitelistPatterns = RegexPatterns.compile(whitelist, "lib.whitelist");
+            // 2) BOOT-INF/lib 单元：名字白名单 AND 内容过滤（正则各预编译一次，避免每个 jar 重复编译）
+            Pattern[] whitelistPatterns = RegexPatterns.compile(filter.libWhitelist, "parse.libs.whitelist");
+            Pattern[] contentPatterns = RegexPatterns.compile(filter.libEntries, "parse.libs.content-filter");
+            int skippedByWhitelist = 0;
+            int skippedByContent = 0;
             for (Enumeration<? extends ZipEntry> en = zip.entries(); en.hasMoreElements(); ) {
                 ZipEntry entry = en.nextElement();
                 if (entry.isDirectory() || !entry.getName().startsWith(BOOT_LIB_PREFIX)
@@ -95,6 +102,13 @@ public final class BootJarParser {
                 }
                 String jarName = entry.getName().substring(BOOT_LIB_PREFIX.length());
                 if (!RegexPatterns.matchesAny(whitelistPatterns, jarName)) {
+                    skippedByWhitelist++;
+                    continue;
+                }
+                // 内容过滤：扫 jar 内条目完整路径，任一条件命中即放行（早退）；
+                // 未配置（空）= 不限制，完全不开流（保持单遍 hash 快路径）
+                if (contentPatterns.length > 0 && !jarContentMatch(zip, entry, contentPatterns)) {
+                    skippedByContent++;
                     continue;
                 }
                 // 先用流算 hash（不把整个 lib jar 读入内存）
@@ -117,9 +131,49 @@ public final class BootJarParser {
                 }
                 libSink.finish();
             }
+            // 汇总跳过计数（不逐 jar 刷屏），两类跳过原因分开可对账
+            if (skippedByWhitelist > 0 || skippedByContent > 0) {
+                FaultLogger.info("lib units skipped: whitelist=" + skippedByWhitelist
+                        + " content-filter=" + skippedByContent);
+            }
         } catch (IOException e) {
             throw new IllegalStateException("parse bootJar failed: " + bootJar + " - " + e.getMessage(), e);
         }
+    }
+
+    /** classes 内容过滤：任一 .class 条目的相对路径命中任一条件即 true；过滤为空恒 true */
+    private static boolean classesContentMatch(List<String> classEntries, ParseFilter filter) {
+        if (filter.classesEntries.isEmpty()) {
+            return true;
+        }
+        Pattern[] patterns = RegexPatterns.compile(filter.classesEntries, "parse.classes.content-filter");
+        for (String name : classEntries) {
+            if (RegexPatterns.matchesAny(patterns, relativeClassesName(name))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** BOOT-INF/classes/xxx → xxx（内容过滤与类路径同口径，不带前缀） */
+    private static String relativeClassesName(String entryName) {
+        return entryName.startsWith(BOOT_CLASSES_PREFIX)
+                ? entryName.substring(BOOT_CLASSES_PREFIX.length()) : entryName;
+    }
+
+    /** lib jar 内容过滤：遍历内部条目名（只读名字不读内容），任一条目命中任一条件即 true（早退） */
+    private static boolean jarContentMatch(ZipFile zip, ZipEntry entry, Pattern[] contentPatterns)
+            throws IOException {
+        try (InputStream in = zip.getInputStream(entry);
+             ZipInputStream zin = new ZipInputStream(in)) {
+            ZipEntry inner;
+            while ((inner = zin.getNextEntry()) != null) {
+                if (RegexPatterns.matchesAny(contentPatterns, inner.getName())) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     /**

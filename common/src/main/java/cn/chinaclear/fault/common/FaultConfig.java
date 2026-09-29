@@ -188,9 +188,33 @@ public final class FaultConfig {
         return v;
     }
 
-    /** BOOT-INF/lib 白名单：正则表达式（对 jar 文件名全串匹配），YAML 列表一行一个（兼容逗号分隔） */
-    public List<String> libWhitelist() {
-        return getList("lib.whitelist");
+    /**
+     * BOOT-INF/lib 白名单（名字维度）：正则表达式（对 jar 文件名全串匹配），YAML 列表一行一个。
+     * 旧键 lib.whitelist 已迁移到 parse.libs.whitelist：检测到旧键存在即抛（防止静默失效）。
+     */
+    public List<String> libsWhitelist() {
+        if (props.getProperty("lib.whitelist") != null || props.getProperty("lib.whitelist.0") != null) {
+            throw new IllegalStateException("config \"lib.whitelist\" has been migrated to"
+                    + " \"parse.libs.whitelist\"（请改用新层级，见 README「三、配置说明」）");
+        }
+        return getList("parse.libs.whitelist");
+    }
+
+    /**
+     * BOOT-INF/lib 内容过滤（内容维度）：正则表达式（对 jar 内每个条目的完整路径全串匹配），
+     * 任一条件命中即解析该 jar；未配置（空列表）= 不限制。与 libsWhitelist 是 AND 关系。
+     */
+    public List<String> libsContentFilter() {
+        return getList("parse.libs.content-filter");
+    }
+
+    /**
+     * BOOT-INF/classes 内容过滤（内容维度）：正则表达式（对 classes 下每个 .class 条目路径全串匹配，
+     * 路径相对 classes/ 前缀，目录本身不单独成条目，目录匹配请写「包路径/.*」），
+     * 任一条件命中才解析整个 classes 单元；未配置（空列表）= 不限制。与 classesEnabled 是 AND 关系。
+     */
+    public List<String> classesContentFilter() {
+        return getList("parse.classes.content-filter");
     }
 
     /** 是否挂载故障模块：false = 纯解析模式（只落库不注入故障，应用正常启动） */
@@ -220,9 +244,9 @@ public final class FaultConfig {
 
     /**
      * 是否解析 BOOT-INF/classes（应用自身代码），默认 true。
-     * false = 只解析 lib.whitelist 命中的第三方 jar，应用代码既不解析也不注入故障
-     * （对应「只对第三方组件做故障演练」的场景）。
-     * 若此时白名单也未匹配到任何 jar，本轮解析单元为空 → 硬保护 PARSE。
+     * false = 只解析 parse.libs.whitelist + parse.libs.content-filter 双重命中的第三方 jar，
+     * 应用代码既不解析也不注入故障（对应「只对第三方组件做故障演练」的场景）。
+     * 若此时 lib 也未匹配到任何 jar，本轮解析单元为空 → 硬保护 PARSE。
      */
     public boolean parseClassesEnabled() {
         return getBoolean("parse.classes.enabled", true);
