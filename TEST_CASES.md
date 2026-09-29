@@ -842,7 +842,7 @@ agent / module 内 `config.yml` 均从备份还原为仓库默认版；`special-
 
 ## 行级抛异常可行性（X 系列，2026-09-23）
 
-> 背景：行级抛异常方案（见 `PLAN-line-exception-injection.md`）的执行机制选型验证。
+> 背景：行级抛异常方案（本地设计稿 `PLAN-line-exception-injection.md`，未入库）的执行机制选型验证。
 > 载荷：自制 `ThrowTestApp`（`work()` 内 5 个有效行，目标行 = `int len = s.length();`，行号 32），
 > main 循环调用并 catch Throwable，打印 `[CAUGHT] type/msg/at`；业务收到异常 = 注入生效。
 > 模块：一次性测试模块 `ft-throw-test`（`/home/lys/.sandbox-module/`，验证后已删），三种 listener 形态
@@ -874,7 +874,7 @@ agent / module 内 `config.yml` 均从备份还原为仓库默认版；`special-
 ## 解析内容过滤（LF / CC 系列，2026-09-29）
 
 > 背景：`parse` 层级下新增 libs / classes 两类单元的**内容过滤**（`content-filter`），与原有名字维度（libs 白名单、
-> classes enabled 开关）是 AND 关系，同维度多条件为 OR。方案见 `PLAN-parse-content-filter.md`，实现见 `5f455b3`
+> classes enabled 开关）是 AND 关系，同维度多条件为 OR。方案见本地设计稿 `PLAN-parse-content-filter.md`（未入库），实现见 `5f455b3`
 > （评审简化见 `198f04e`）。本轮为远程 Linux（192.168.193.129 / lys，sandbox.home=/home/lys/sandbox）实测。
 >
 > 载荷：`test-app.jar`（`BOOT-INF/lib/` 共 37 个 jar：test-lib × 1、spring* × 16（其中 6 个 starter 是空壳 jar、

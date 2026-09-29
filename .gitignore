@@ -16,5 +16,8 @@ compile-out.txt
 /tests/
 /stress-app/
 
+# 设计方案稿（PLAN-*.md）只在本地留存，不入库
+PLAN-*.md
+
 # Eclipse 编译输出
 bin/
