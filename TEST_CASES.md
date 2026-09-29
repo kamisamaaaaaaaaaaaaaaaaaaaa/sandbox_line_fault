@@ -871,3 +871,91 @@ agent / module 内 `config.yml` 均从备份还原为仓库默认版；`special-
 - 模块侧 API 写法：`beforeLine` 内 `ProcessController.throwsImmediately(ex)`；`ProcessControlException` 是受检异常，
   `beforeLine` 不声明 throws，需 sneaky-throw 抛出。
 
+## 解析内容过滤（LF / CC 系列，2026-09-29）
+
+> 背景：`parse` 层级下新增 libs / classes 两类单元的**内容过滤**（`content-filter`），与原有名字维度（libs 白名单、
+> classes enabled 开关）是 AND 关系，同维度多条件为 OR。方案见 `PLAN-parse-content-filter.md`，实现见 `5f455b3`
+> （评审简化见 `198f04e`）。本轮为远程 Linux（192.168.193.129 / lys，sandbox.home=/home/lys/sandbox）实测。
+>
+> 载荷：`test-app.jar`（`BOOT-INF/lib/` 共 37 个 jar：test-lib × 1、spring* × 16（其中 6 个 starter 是空壳 jar、
+> spring-jcl 只含 `org/apache/commons/logging`）、mysql × 1、其余 19 个）；test-lib 内预置标记物
+> `cn/chinaclear/marker/MarkerClass.class` 与 `META-INF/test-marker.properties`。
+> 执行方式：改 agent jar 内 `config.yml`（`cfg-agent.sh`）→ `java -Dfault.tag=<tag> -javaagent:... -jar test-app.jar`
+> → 看 agent 日志 → 查库 → kill。用例配置与脚本在远程 `/home/lys/cf/pcf/`（yml + `run-case.sh`）。
+> 解析类用例统一 `mount.enabled=false`（纯解析，不起注入）；注入类用例另配 `mount.enabled=true`。
+
+### 判定口径（先看这里，否则会误判）
+
+1. **幂等 skip 会干扰库侧判断**：单元 sha256 已 `completed` 时日志为 `unit already completed, skip`，但该 unitId
+   **仍计入本轮单元清单**。所以"是否被过滤"只能看本轮日志的结论行：
+   - `parse units: count=N ids=[...]（classes=true/false, libs.content-filter=X 条, classes.content-filter=Y 条）`
+   - `lib units skipped: whitelist=N content-filter=M`（两类跳过原因分开计数）
+   - `classes unit skipped by content-filter: no .class entry matches ...` / `classes unit skipped: parse.classes.enabled=false`
+   要核对方法明细时，先 `delete` 掉该单元的 `t_jar_record` + `t_class_method` 行强制重解析（见下方"强制重解析"）。
+2. **classes 与 libs 的匹配对象不同**：classes 只枚举 `.class` 条目（目录不单独成条目，目录匹配必须写「包路径/.*」）；
+   libs 匹配 jar 内**所有**条目名（含以 `/` 结尾的目录条目）。两类口径分别由 CC3 与 LF3/LF4 覆盖。
+
+### LF 系列（libs 内容过滤）
+
+| # | 配置（whitelist / content-filter） | 预期 | 结果 |
+| --- | --- | --- | --- |
+| LF1 基线兼容 | `test-lib.*` / 不配 | 仅 test-lib 入库，与旧行为一致 | ✅ `skipped: whitelist=36 content-filter=0`；`units=[1695 CLASSES, 2439 test-lib]` |
+| LF2 精确匹配文件 | `test-lib.*, spring.*` / `META-INF/test-marker\.properties` | 仅 test-lib 入库 | ✅ `whitelist=20 content-filter=16`；`units=[1695, 2439]` |
+| LF3 精确匹配目录 | 同上 / `cn/chinaclear/marker/` | 仅 test-lib 入库（目录条目本身精确匹配） | ✅ `whitelist=20 content-filter=16`；`units=[1695, 2439]` |
+| LF4 模糊匹配目录 | 同上 / `cn/chinaclear/marker/.*` | 仅 test-lib 入库 | ✅ 同上 |
+| LF5 模糊匹配一批 | `test-lib.*, spring.*, mysql.*` / `org/springframework/.*` | spring 真实 jar 入库，test-lib 与 mysql 被滤 | ✅ `whitelist=19 content-filter=9`；`units=[1695, 2447~2455]`（9 个 spring 真实 jar：webmvc/web/autoconfigure/boot/context/aop/beans/expression/core） |
+| LF6 OR 多条件 | 同 LF5 / `META-INF/test-marker\.properties` + `org/springframework/.*` | test-lib + spring 入库，mysql 被滤 | ✅ `whitelist=19 content-filter=8`；`units=[1695, 2439, 2447~2455]`（11 个） |
+| **LF11 AND：名字不命中但内容命中** | `test-lib.*` / `org/springframework/.*` | spring 仍不解析（名字维先挡）；test-lib 名字命中、内容不命中 → libs 全空 | ✅ `whitelist=36 content-filter=1`；`units=[1695]`（只剩 classes） |
+| **LF12 AND：两维都命中** | `test-lib.*, spring.*` / `org/springframework/.*` | spring 入库、test-lib 被滤（与 LF11 对照闭环） | ✅ `whitelist=20 content-filter=8`；`units=[1695, 2447~2455]` |
+| LF7 叠加过滤到零（libs） | 同 LF11（classes 照常） | 只落 classes 单元，放行 | ✅ `units=[1695]`，应用正常 `Started TestApplication` |
+| LF7b 同上 + `classes.enabled=false` | 两类单元都为空 | 零单元硬保护 PARSE，文案含四个键 | ✅ `HARD PROTECT: phase=PARSE ... parse.classes.enabled=false, parse.classes.content-filter=[], parse.libs.whitelist=[test-lib.*], parse.libs.content-filter=[org/springframework/.*]` |
+| LF8 非法正则 | `content-filter: ['[bad']` | 硬保护 PARSE，报错含键名 | ✅ `invalid parse.libs.content-filter regex（第 0 条）"[bad": Unclosed character class near index 3` |
+| LF9 旧键 fail-fast | 写旧键 `lib.whitelist` | 启动即配置非法，提示迁移 | ✅ `config "lib.whitelist" has been migrated to "parse.libs.whitelist"（请改用新层级，见 README「三、配置说明」）` |
+| LF10 滤除日志 | 复跑 LF2/LF4/LF5/LF6/LF12 | 每轮恰好 1 条 libs 跳过汇总，不逐 jar 刷屏 | ✅ 五个 `.out` 各 1 行 `lib units skipped`，无逐 jar 日志 |
+
+**强制重解析（口径不变验证）**：删除 test-lib 单元（2439）及其方法行后跑 LF2，重新解析出新单元 `id=2556`：
+`class_count=10 method_count=25`，与重置前 2439 的 `10 / 25` 完全一致 → **过滤只决定"哪些单元被解析"，不改变解析口径**。
+
+### CC 系列（classes 内容过滤）
+
+| # | 配置（classes.enabled / content-filter） | 预期 | 结果 |
+| --- | --- | --- | --- |
+| CC1 基线兼容 | `true` / 不配 | classes 单元照常解析 | ✅ `units=[1695, 2439]`，`classes.content-filter=0 条` |
+| CC2 精确匹配类文件 | `cn/chinaclear/fault/testapp/service/OrderService.class` | classes 单元正常解析 | ✅ `units=[1695, 2439]` |
+| CC3 模糊匹配包目录 | `cn/chinaclear/fault/testapp/service/.*` | 同上 | ✅ `units=[1695, 2439]` |
+| CC4 内容全不命中 | `cn/chinaclear/marker/.*` | 整个 classes 单元跳过（不落 CLASSES、不算 hash），libs 照常 | ✅ `classes unit skipped by content-filter: no .class entry matches parse.classes.content-filter=[cn/chinaclear/marker/.*]` → `units=[2439]`，应用正常启动 |
+| **CC7 AND：enabled=false 但内容命中** | `false` / `...service/.*` | classes 仍不解析（开关维先挡） | ✅ `classes unit skipped: parse.classes.enabled=false` → `units=[2439]` |
+| CC5 两类都滤空 | classes 不命中 + libs 同 LF7 | 零单元硬保护 PARSE | ✅ 文案同时给出 classes 与 libs 四个键的取值 |
+| CC6 非法正则 | `content-filter: ['[bad']` | 硬保护 PARSE，报错含键名 | ✅ `invalid parse.classes.content-filter regex（第 0 条）"[bad": Unclosed character class near index 3` |
+
+### 注入侧回归（main 线程稳定方法）
+
+> 模块侧 `inject.filters`：`scope: global` + `include: ['cn\.chinaclear\.fault\.testapp\.service\.OrderService\.auditAll']`，
+> 命中目标唯一、便于断言；由 main 线程的 `CommandLineRunner`（`orderService.auditAll()`）驱动，不用 HTTP 触发。
+
+| # | 配置 | 预期 | 结果 |
+| --- | --- | --- | --- |
+| R1 基线（不过滤） | lf01m：`mount.enabled=true` + libs whitelist=test-lib | 两个单元，注入 1 个方法，命中 1 次 | ✅ `unit: 2556 LIB_JAR / 1695 CLASSES`，`scanned=64 rows, injected=1`；`t_fault_record`：OrderService.auditAll line=72 thread=main cnt=1 → kill |
+| R2 classes 内容过滤命中 | cc03m：`classes.content-filter=.../service/.*` | 与 R1 完全一致 | ✅ 同样 `injected=1`、命中 line=72、thread=main、cnt=1 |
+| R3 classes 被滤空 | cc04m：`classes.content-filter=cn/chinaclear/marker/.*` | OrderService 不在单元清单 → 零注入 | ✅ `unit: 2556`（无 1695），`scanned=25 rows, injected=0`；`t_fault_record` 无 tag=cc04m 记录；模块按零覆盖策略 `no class registered after include/exclude filtering, unitIds=[2556] -> kill per policy` |
+
+**结论**：内容过滤只改变"哪些单元进入解析与注入范围"；命中行号、每行每线程次数（默认 1）、线程归属、行覆盖率口径均不受影响。
+
+### 本轮踩坑
+
+| 坑 | 现象 | 说明 |
+| --- | --- | --- |
+| 空壳 starter jar 混进计数 | `spring-boot-starter-*.jar` 只有 `META-INF`，名字命中 `spring.*` 但内容不含 `org/springframework/`；`spring-jcl` 同理（内含 `org/apache/commons/logging`） | LF5 的 `content-filter=9` = 6 个 starter + spring-jcl + mysql + test-lib，按此口径才对得上账 |
+| 幂等 skip 误判 | 单元已完成时库里不新增行，容易误以为"被过滤了" | 一律以本轮 `parse units` / `lib units skipped` / `classes unit skipped` 结论行为准；要核对明细先删单元强制重解析 |
+| plink 传参会吃掉双引号 | `plink ... "grep -c \"lib units skipped\" f"` → bash 收到 `grep -c lib units skipped f`，报 `No such file or directory` | 带空格的模式一律写进远程 `.sh` 再执行，不要在 plink 命令行里拼引号 |
+
+### 还原记录
+
+- agent：重新上传仓库默认版 `fault-agent-1.0.0.jar`（可选配置全注释）到 `/home/lys/`（本轮改过的版本备份为
+  `/home/lys/fault-agent-1.0.0.jar.bak-pcf`）；module 侧 `config.yml` 从仓库默认版还原（`inject.filters` 移除）。
+- 临时目录 `/tmp/cfchk` 已删除；无残留 java 进程。
+- 数据保留：`test-lib` 单元 `2556`（原 `2439` 已按验证需要删除重建，口径 10 类 25 方法一致）、spring 九个单元
+  `2447~2455`（前期轮次产物）、`t_fault_record` 中 `tag=lf01m` / `tag=cc03m` 各 1 条保留备查。
+- 用例配置、日志与辅助脚本保留在 `/home/lys/cf/pcf/`（`*.yml`、`logs/*.out`、`run-case.sh`、`runq.sh`、
+  `dbq.sh`、`dbr.sh`、`fr.sh`、`mlog.sh`），便于后续回归。
+
