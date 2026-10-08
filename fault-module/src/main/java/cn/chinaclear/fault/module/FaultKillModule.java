@@ -87,6 +87,11 @@ public class FaultKillModule implements Module {
             FaultLogger.info("thread filter: " + (threadFilter.enabled()
                     ? threadFilter + " (non-passing threads are silently released)"
                     : "none (all threads participate)"));
+            // 线程归组概要：组键格式与观测列去向，便于对账（归组合法性与过滤同源，非法已在构造时抛出）
+            FaultLogger.info("thread group: " + (threadFilter.groupCount() > 0
+                    ? threadFilter.groupCount() + " rule(s), matched threads share the quota by group key"
+                    + " 'group:<regex>' (t_fault_record.thread_name; real name in origin_thread_name)"
+                    : "none (each thread counted by its own name)"));
 
             JdbcHelper db = new JdbcHelper(config.jdbcUrl(), config.jdbcUsername(), config.jdbcPassword(),
                     config.jdbcDriver());

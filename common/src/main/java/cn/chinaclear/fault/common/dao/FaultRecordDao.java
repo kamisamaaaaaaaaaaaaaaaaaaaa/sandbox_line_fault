@@ -27,12 +27,13 @@ public final class FaultRecordDao {
     public boolean tryInsert(FaultRecord fr) {
         String sql = "INSERT INTO t_fault_record"
                 + " (unit_id, tag, hostname, ip, boot_jar, boot_jar_hash, class_name, method_name,"
-                + " method_desc, line_no, thread_name, fault_seq, stack_hash, stack_text, fault_type, occurred_at)"
-                + " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)";
+                + " method_desc, line_no, thread_name, origin_thread_name, fault_seq, stack_hash, stack_text, fault_type, occurred_at)"
+                + " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)";
         return db.executeInsert(sql,
                 new Object[]{fr.getUnitId(), fr.getTag(), fr.getHostname(), fr.getIp(),
                         fr.getBootJar(), fr.getBootJarHash(), fr.getClassName(),
                         fr.getMethodName(), fr.getMethodDesc(), fr.getLineNo(), fr.getThreadName(),
+                        fr.getOriginThreadName(),
                         fr.getFaultSeq(),
                         fr.getStackHash(), fr.getStackText(),
                         fr.getFaultType(), new Timestamp(fr.getOccurredAt().getTime())},

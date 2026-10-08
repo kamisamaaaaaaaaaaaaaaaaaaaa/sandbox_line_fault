@@ -12,7 +12,9 @@ import com.alibaba.jvm.sandbox.api.listener.ext.Advice;
 import com.alibaba.jvm.sandbox.api.listener.ext.AdviceListener;
 import com.alibaba.jvm.sandbox.api.listener.ext.Behavior;
 
+import java.util.Collections;
 import java.util.Date;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
@@ -20,11 +22,14 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * 行级监听：beforeLine 中 INSERT 表3 抢占，
- * 判重键 = 轮次 tag + bootJar 部署路径 + 行 + 线程 + 调用栈 + 第几次故障。
- * 同一行同一线程同一调用栈本轮可发生多次故障（次数上限由 inject.fault.times 决定）：
- * 插入成功 = 本节点赢得该行该线程该调用栈本轮第 fault_seq 次的故障执行权
+ * 判重键 = 轮次 tag + bootJar 部署路径 + 行 + 线程身份 + 调用栈 + 第几次故障。
+ * 线程身份由 ThreadFilter 解析：配置 thread.group 归组时，命中组的线程以组键
+ * 「group:&lt;正则原文&gt;」计数（同组线程共享配额，一线程命中多组则各身份独立），
+ * 未命中任何组 = 原始线程名；真实线程名记入 origin_thread_name（纯观测列）。
+ * 同一行同一线程身份同一调用栈本轮可发生多次故障（次数上限由 inject.fault.times 决定）：
+ * 插入成功 = 本节点赢得该行该身份该调用栈本轮第 fault_seq 次的故障执行权
  *          → 打印调用栈后 kill 当前进程；
- * DuplicateKey = 该次故障已被集群内其他节点/进程触发 → 计数推进后放行继续执行。
+ * DuplicateKey = 该次故障已被集群内其他节点/进程触发 → 计数推进后尝试下一身份/放行。
  * 正确性完全由数据库唯一索引保证；counters / exhausted 仅缓存本进程已确认的故障次数，
  * 避免存活节点在热路径行上反复撞库。
  *
@@ -93,71 +98,22 @@ final class KillAdviceListener extends AdviceListener {
             // 方法描述符：由 Behavior 的参数类型与返回类型还原 JVM 描述符（与 t_class_method 存储格式一致），
             // 供排查时区分重载；纯观测字段，不参与判重
             final String methodDesc = descOf(behavior.getReturnType(), behavior.getParameterTypes());
-            // 计数/判重键含线程与调用栈：同一行被不同线程执行、或经不同调用路径执行时
-            // 故障场景不同，每个「线程 + 调用栈」组合独立计数、各占一次故障机会
-            final String hitKey = className + "#" + method + "#" + lineNum + "#" + threadName
-                    + "#" + stack.hash();
             lineKey = className + "#" + method + "#" + lineNum;
-            if (exhausted.contains(hitKey)) {
-                return;    // 该行该线程该调用栈本轮故障次数已用尽：不再撞库、不再计数
+            // 故障计数身份列表（归组）：命中组的线程按组键计数（多组全部返回、组间独立），
+            // 未命中任何组 = 原始线程名（现状行为）。归组只改「身份怎么取」，判重机制不变；
+            // 真实线程名始终记入 origin_thread_name 供观测。
+            List<String> identities = threadFilter.groupKeysOf(threadName);
+            if (identities.isEmpty()) {
+                identities = Collections.singletonList(threadName);
             }
-            int seq = nextSeq(hitKey);
-            if (seq < 0) {
-                return;
-            }
-            FaultRecord fr = new FaultRecord();
-            fr.setUnitId(unitId);
-            fr.setTag(tag);
-            fr.setHostname(MachineInfo.hostname());
-            fr.setIp(MachineInfo.ip());
-            fr.setBootJar(bootJar);
-            fr.setBootJarHash(bootJarHash);
-            fr.setClassName(className);
-            fr.setMethodName(method);
-            fr.setMethodDesc(methodDesc);
-            fr.setLineNo(lineNum);
-            fr.setThreadName(threadName);
-            fr.setFaultSeq(seq);
-            fr.setStackHash(stack.hash());
-            fr.setStackText(stack.text());
-            fr.setFaultType("KILL_PROCESS");
-            fr.setOccurredAt(new Date());
-
-            boolean won = faultRecordDao.tryInsert(fr);
-            if (won) {
-                // kill 之前打印触发本次故障的调用栈，便于定位故障发生在哪条调用路径上。
-                // 仅在本节点赢得抢占时打印：冲突放行分支会被反复执行，打印会造成日志膨胀。
-                // 故障命中是演练的预期事件而非错误，级别为 INFO（但它是 kill 前最后一条，永远输出）。
-                FaultLogger.info("FAULT HIT & PREEMPTED: tag=" + tag
-                        + " unitId=" + unitId
-                        + " class=" + className
-                        + " method=" + method
-                        + " line=" + lineNum
-                        + " seq=" + seq + "/" + faultTimes
-                        + " thread=" + threadName
-                        + " stackHash=" + stack.hash()
-                        + " machine=" + fr.getHostname() + "/" + fr.getIp()
-                        + "\ncall stack (" + stack.frames() + " frames):\n" + stack.text());
-                if (!KillUtil.killCurrentProcess(pid)) {
-                    // kill 手段未生效：回滚记录并放行进程（进程继续运行，不在本工具内强行 halt）
-                    FaultLogger.error("kill not effective, rollback fault record and release: "
-                            + hitKey + " seq=" + seq);
-                    recordError("kill not effective (process still alive), fault record rolled back", lineKey, null);
-                    try {
-                        faultRecordDao.delete(fr);
-                    } catch (Throwable ignore) {
-                        // rollback failure is irrelevant
-                    }
-                    rollback(hitKey, seq);
+            for (String identity : identities) {
+                // 抢占成功（含 kill 未生效的回滚放行）即结束：一次执行至多发生一次故障
+                if (preempt(unitId, className, method, methodDesc, lineNum, identity, threadName, stack)) {
+                    return;
                 }
-                // kill 生效：进程终止，本方法不会正常返回
-            } else {
-                // DuplicateKey：该行该线程本轮的第 seq 次故障已被其他节点/进程触发。
-                // 计数已在 nextSeq 中推进，放行继续执行（不再反复撞库）。
-                // 多节点并发时该分支与冲突次数成正比，属过程明细，降为 DEBUG（log.level=INFO 下静默）
-                FaultLogger.debug("fault seq already preempted in this round (tag=" + tag
-                        + "), release execution: " + hitKey + " seq=" + seq);
+                // DuplicateKey：该身份本轮的该次故障已被集群内其他节点/进程触发 → 尝试下一身份
             }
+            // 全部身份已用尽或被抢占：放行继续执行（不再反复撞库）
         } catch (Throwable t) {
             // 任何异常（含 DB 不可用）：记表4 后按硬保护 kill —— 故障工具宁可不放行，
             // 也不能让一个"已注入但可能不生效"的进程继续运行
@@ -177,8 +133,92 @@ final class KillAdviceListener extends AdviceListener {
     }
 
     /**
+     * 按一个故障计数身份尝试抢占（一个身份 = 一个计数主体：组键或原始线程名）。
+     * 返回 false = 该身份本轮该次故障已被抢占或次数用尽（冲突/越界），调用方尝试下一身份；
+     * 返回 true  = 本节点赢得该身份本轮第 fault_seq 次的故障执行权，已打印调用栈并 kill
+     *（kill 未生效时回滚记录并放行进程，仍返回 true——一次执行至多发生一次故障）。
+     *
+     * 计数键 = 行 + 身份 + 调用栈摘要，与表3 唯一索引的判重粒度严格一致；
+     * 真实线程名（originThreadName）只作观测写入，不参与判重。
+     */
+    private boolean preempt(long unitId, String className, String method, String methodDesc, int lineNum,
+                            String identity, String originThreadName, CallStack stack) {
+        final String hitKey = className + "#" + method + "#" + lineNum + "#" + identity
+                + "#" + stack.hash();
+        if (exhausted.contains(hitKey)) {
+            return false;    // 该行该身份该调用栈本轮故障次数已用尽：不再撞库、不再计数
+        }
+        int seq = nextSeq(hitKey);
+        if (seq < 0) {
+            return false;    // 并发越界：不再尝试
+        }
+        FaultRecord fr = new FaultRecord();
+        fr.setUnitId(unitId);
+        fr.setTag(tag);
+        fr.setHostname(MachineInfo.hostname());
+        fr.setIp(MachineInfo.ip());
+        fr.setBootJar(bootJar);
+        fr.setBootJarHash(bootJarHash);
+        fr.setClassName(className);
+        fr.setMethodName(method);
+        fr.setMethodDesc(methodDesc);
+        fr.setLineNo(lineNum);
+        fr.setThreadName(identity);
+        fr.setOriginThreadName(originThreadName);
+        fr.setFaultSeq(seq);
+        fr.setStackHash(stack.hash());
+        fr.setStackText(stack.text());
+        fr.setFaultType("KILL_PROCESS");
+        fr.setOccurredAt(new Date());
+
+        boolean won = faultRecordDao.tryInsert(fr);
+        if (won) {
+            // kill 之前打印触发本次故障的调用栈，便于定位故障发生在哪条调用路径上。
+            // 仅在本节点赢得抢占时打印：冲突放行分支会被反复执行，打印会造成日志膨胀。
+            // 故障命中是演练的预期事件而非错误，级别为 INFO（但它是 kill 前最后一条，永远输出）。
+            // thread=身份（组键或原始名）、originThread=真实线程名，两者并列便于对账。
+            FaultLogger.info("FAULT HIT & PREEMPTED: tag=" + tag
+                    + " unitId=" + unitId
+                    + " class=" + className
+                    + " method=" + method
+                    + " line=" + lineNum
+                    + " seq=" + seq + "/" + faultTimes
+                    + " thread=" + identity
+                    + " originThread=" + originThreadName
+                    + " stackHash=" + stack.hash()
+                    + " machine=" + fr.getHostname() + "/" + fr.getIp()
+                    + "\ncall stack (" + stack.frames() + " frames):\n" + stack.text());
+            if (!KillUtil.killCurrentProcess(pid)) {
+                // kill 手段未生效：回滚记录并放行进程（进程继续运行，不在本工具内强行 halt）
+                FaultLogger.error("kill not effective, rollback fault record and release: "
+                        + hitKey + " seq=" + seq);
+                recordError("kill not effective (process still alive), fault record rolled back", lineKeyOf(className, method, lineNum), null);
+                try {
+                    faultRecordDao.delete(fr);
+                } catch (Throwable ignore) {
+                    // rollback failure is irrelevant
+                }
+                rollback(hitKey, seq);
+            }
+            // kill 生效：进程终止，本方法不会正常返回
+            return true;
+        }
+        // DuplicateKey：该身份本轮的第 seq 次故障已被其他节点/进程触发。
+        // 计数已在 nextSeq 中推进，返回 false 交由调用方尝试下一身份/放行。
+        // 多节点并发时该分支与冲突次数成正比，属过程明细，降为 DEBUG（log.level=INFO 下静默）
+        FaultLogger.debug("fault seq already preempted in this round (tag=" + tag
+                + "), release execution: " + hitKey + " seq=" + seq);
+        return false;
+    }
+
+    /** 表4 留痕用的行标识（与 beforeLine 的 lineKey 同构；preempt 独立成方法后单独拼装） */
+    private static String lineKeyOf(String className, String method, int lineNum) {
+        return className + "#" + method + "#" + lineNum;
+    }
+
+    /**
      * 取本次应尝试的故障序号（= 已确认次数 + 1）；返回 -1 表示无需再尝试。
-     * 计数键为「行 + 线程 + 调用栈摘要」，每个组合独立享有 inject.fault.times 次故障机会。
+     * 计数键为「行 + 线程身份 + 调用栈摘要」，每个组合独立享有 inject.fault.times 次故障机会。
      * 计数在尝试前 +1：插入成功（本节点赢得该次）与冲突（他节点已赢得该次）
      * 都意味着该序号已被确认，据此与数据库状态同步，不需要预先查库。
      */

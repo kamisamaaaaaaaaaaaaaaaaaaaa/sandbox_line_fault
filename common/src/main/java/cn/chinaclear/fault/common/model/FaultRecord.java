@@ -25,7 +25,16 @@ public class FaultRecord {
      */
     private String methodDesc;
     private int lineNo;
+    /**
+     * 故障计数身份：未归组 = 原始线程名；配置 thread.group 归组后 = 组键
+     * 「group:&lt;正则原文&gt;」（同组线程共享配额，判重键组成部分，唯一索引含本列）。
+     */
     private String threadName;
+    /**
+     * 真实线程名（纯观测，不入唯一索引）：thread_name 为组键时由此列还原实际执行线程；
+     * 未归组时与 threadName 同值。NULL = 旧版模块写入（未采集）。
+     */
+    private String originThreadName;
     /** 该行该线程该调用栈本轮的第几次故障（从 1 开始），上限由 inject.fault.times 决定 */
     private int faultSeq;
     /**

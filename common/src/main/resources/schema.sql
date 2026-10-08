@@ -59,7 +59,8 @@ CREATE TABLE IF NOT EXISTS t_fault_record (
   method_name   VARCHAR(128) NOT NULL,
   method_desc   TEXT         NULL COMMENT '命中方法的 ASM 描述符（供区分重载，纯观测，不入索引）',
   line_no       INT          NOT NULL,
-  thread_name   VARCHAR(128) NOT NULL,
+  thread_name   VARCHAR(128) NOT NULL COMMENT '故障计数身份：未归组 = 原始线程名；配置 thread.group 归组后 = 组键「group:<正则原文>」（唯一索引组成部分）',
+  origin_thread_name VARCHAR(128) NULL COMMENT '真实线程名（纯观测，不入唯一索引）：thread_name 为组键时由此列还原实际执行线程；未归组时与 thread_name 同值；NULL = 旧版模块写入（未采集）',
   fault_seq     INT          NOT NULL COMMENT '该行该线程该调用栈本轮的第几次故障（从 1 开始，上限由 inject.fault.times 决定）',
   stack_hash    CHAR(32)     NOT NULL DEFAULT '' COMMENT '调用栈摘要：MD5(stack_text) 32 位小写 hex（判重键组成部分；原文超长无法入索引）',
   stack_text    MEDIUMTEXT   NULL COMMENT '触发故障时的调用栈：已裁剪取栈入口/sandbox/本模块帧，帧格式「类.方法(文件:行)」，换行分隔',
@@ -67,6 +68,16 @@ CREATE TABLE IF NOT EXISTS t_fault_record (
   occurred_at   DATETIME     NOT NULL,
   UNIQUE KEY uk_hit_node (tag, boot_jar_hash, class_name, method_name, line_no, thread_name, fault_seq, stack_hash)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- =====================================================================
+-- 已有库升级 4：t_fault_record 增加真实线程名观测列（配合 thread.group 线程归组）
+-- 适用场景：本文件此前已执行过、t_fault_record 已存在且已有数据的库。
+-- 纯观测列（不入唯一索引），存量行统一为 NULL（表示「未采集」），不影响任何判重逻辑。
+-- 注意部署顺序：必须先执行本升级、再部署含 thread.group 的新版模块——新版模块的
+-- INSERT 带该列，旧表上会报 Unknown column 走硬保护。执行前建议备份该表。
+-- =====================================================================
+-- ALTER TABLE t_fault_record
+--   ADD COLUMN origin_thread_name VARCHAR(128) NULL COMMENT '真实线程名（纯观测，不入唯一索引）：thread_name 为组键时由此列还原实际执行线程；未归组时与 thread_name 同值；NULL = 旧版模块写入（未采集）' AFTER thread_name;
 
 -- =====================================================================
 -- 已有库升级 3：t_class_method 增加方法有效代码行数

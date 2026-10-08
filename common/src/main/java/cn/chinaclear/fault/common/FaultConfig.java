@@ -283,12 +283,13 @@ public final class FaultConfig {
     }
 
     /**
-     * 线程名过滤：include 选入（空 = 全选）、exclude 排除，正则对线程名全串匹配。
-     * 未配置（thread: 段整段注释）= 全部线程参与故障。正则非法立即抛异常，
-     * 由调用方上层转硬保护。
+     * 线程名过滤与归组：include 选入（空 = 全选）、exclude 排除，正则对线程名全串匹配。
+     * group 为归组正则列表（每条一个独立组，组键 = "group:&lt;正则原文&gt;"）：
+     * 键不存在 = 合法 = 不归组（身份 = 原始线程名）；键存在但无值 / 列表项留空 = 非法（getList 拦截）。
+     * 正则非法立即抛异常，由调用方上层转硬保护。
      */
     public ThreadFilter threadFilter() {
-        return new ThreadFilter(getList("thread.include"), getList("thread.exclude"));
+        return new ThreadFilter(getList("thread.include"), getList("thread.exclude"), getList("thread.group"));
     }
 
     /** 日志目录（相对路径基于目标进程工作目录） */
