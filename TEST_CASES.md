@@ -959,3 +959,56 @@ agent / module 内 `config.yml` 均从备份还原为仓库默认版；`special-
 - 用例配置、日志与辅助脚本保留在 `/home/lys/cf/pcf/`（`*.yml`、`logs/*.out`、`run-case.sh`、`runq.sh`、
   `dbq.sh`、`dbr.sh`、`fr.sh`、`mlog.sh`），便于后续回归。
 
+## 线程归组（TG 系列，2026-10-08）
+
+> 背景：`thread.group` 正则列表（module 侧）——命中的线程以组键 **`group:<正则原文>`** 作为故障计数身份
+> （表3 `thread_name`），同组线程共享「每行每身份每调用栈 N 次」配额；一线程命中 k 组则 k 组各自独立计数；
+> 未命中任何组 = 原始线程名（现状行为）。真实线程名记入新增观测列 `origin_thread_name`（不入唯一索引）。
+> **判重机制零改动**：唯一索引 uk_hit_node、裸 INSERT 冲突抢占、kill 失败回滚全部原样生效。
+> 方案：本地设计稿 `PLAN-thread-group.md`（未入库）；实现 = ThreadFilter 组匹配 + KillAdviceListener 逐身份抢占。
+>
+> 载荷：`GroupCases.hit`（单行目标方法，BOOT-INF/classes）+ `TestApplication.runGroupCases`
+> （`-Dtg.threads=thread-0,thread-1,thread-2,worker-0` 固定名线程顺序驱动、`-Dtg.repeat=N` 循环调用、
+> `-Dtg.mode=wrap` 经第二调用路径）。module filters include `GroupCases.hit`；执行方式：固定 tag +
+> 多轮「启动→命中 kill→重启」推进 fault_seq（TC4 续抢模式）；脚本与配置在远程 `/home/lys/cf/tg/`（tg.sh）。
+
+| # | 场景 | 配置 | 预期 | 结果 |
+| --- | --- | --- | --- | --- |
+| TG0/TG2 基线对照 | 不配置 group（键不写），times=1 | 按原始线程名计数、不合并 | ✅ 3 条记录 thread_name=thread-0/1/2 各 seq=1；第 4 轮放行 |
+| TG1 合并计数（核心） | group=['thread-.*']，times=3，thread-0/1/2 | 三线程合计 3 次 | ✅ 3 条记录 thread_name 全为 `group:thread-.*`、origin_thread_name 分别 thread-0/1/2、seq=1/2/3；第 4 轮放行不再 kill |
+| TG3 多组独立 | group=['thread-.*','worker-.*']，times=3 | 两组各自独立记账 | ✅ `group:thread-.*` 3 条（seq1/2/3，origin thread-0/1/2）+ `group:worker-.*` 3 条（seq1/2/3，origin worker-0），互不干扰 |
+| TG4 一线程命中两组 | group=['thread-.*','thread-1.*']，times=3，仅 thread-1 | 两个身份各自独立推进 | ✅ 两个组键各 3 条（seq1/2/3），origin 均 thread-1；同一次执行先到先得 kill（G1 优先），其余身份后续轮次继续 |
+| TG5 未命中组回退原始名 | group=['worker-.*']，times=1，thread-0/1/2 | 身份 = 原始线程名 | ✅ 3 条 thread_name=thread-0/1/2 各 seq=1 |
+| TG6 组键格式与观测列 | 查 TG1/TG3 记录 | thread_name 带 `group:` 前缀；origin_thread_name 恒为真实名 | ✅ `group:thread-.*` / `group:worker-.*`，origin_thread_name 与日志 originThread 一致 |
+| TG7 过滤优先于归组 | exclude=['thread-1'] + group=['thread-.*']，times=3 | 被 exclude 的线程不参与归组与计数 | ✅ 仅 2 条（seq1/2，origin thread-0/2），thread-1 全程静默（无记录无放行痕迹）；G1 用尽后 t2 亦放行 |
+| TG8 正则/YAML 非法 | `['[bad']`（YAML 层）/ `['+bad']`（正则层） | 启动即硬保护，报错含键名 | ✅ `[bad` → `invalid config.yml: while parsing a flow sequence`（YAML 层拦截）；`+bad` → `invalid thread.group regex（第 0 条）"+bad": Dangling meta character '+' near index 0` |
+| TG9 留空非法 | `group:` 无值 / 列表项 `- ` 留空 | 两种形态均启动即硬保护 | ✅ `config "thread.group" is present but has no value` / `config "thread.group" item 0 is empty`（错误页中文注释显示为 `?` 系错误页字符集，消息本身正确） |
+| TG10 观测列兼容 | 旧数据 + 升级 SQL | 存量行 origin 为 NULL、索引不变 | ✅ `ALTER ... ADD COLUMN` 后 1181 条旧记录 origin 全 NULL；uk_hit_node 仍 8 列；新记录恒有值 |
+| TG11 部署顺序约束 | 未升级表直接上新模块 | INSERT 报 Unknown column → 硬保护 | ✅ `Unknown column 'origin_thread_name' in 'field list'` → beforeLine 异常落表4（INJECT/EXCEPTION）→ kill，报错路径清晰 |
+| TG12 幂等续抢（组键下） | 同 tag 多轮重启 | 冲突放行、下一 seq 抢占成功 | ✅ TG1/TG3/TG4 各轮均体现：已占 seq 冲突放行、后续 seq 抢占成功、配额用尽后连续放行 |
+| TG13 归组只合并线程维 | times=1，同一行经直调 / wrap 两条调用路径 | 同组不同 stack_hash 各自独立计数 | ✅ 2 条记录同 thread_name=`group:thread-.*`、seq 均=1、stack_hash 不同（直调 9684… / wrap 11aa…） |
+
+### 实测要点与踩坑
+
+1. **repeat 载荷是必需的**：kill-重启模式下「每轮每线程只调一次」时，冲突放行后同进程内没有第二次回调，
+   组配额的 seq2/3 永远不会被尝试（TG3/TG4 初跑 G2 只推进到 seq1）。真实长运行应用是反复调用的，
+   驱动加 `-Dtg.repeat=N` 后 seq 推进完整覆盖——组键下的计数推进发生在**同一进程的多次回调**之间，
+   跨进程重启只负责「占位后从下一 seq 续抢」。
+2. **boot_jar_hash 随 jar 内容变化**：中途重建 test-app.jar 后判重键整体重置（同 tag 下又从 seq1 开始占位），
+   这是「部署路径+内容即应用标识」的既有设计；对账时注意区分新旧 jar 的记录（stack_hash 亦随之变化）。
+3. **YAML 会先于正则拦下一部分非法写法**：`[bad`（flow sequence）、`*bad`（alias 语法）都在 YAML 解析层报
+   `invalid config.yml`；正则层的报错要用 YAML 安全的写法触发（如 `+bad`）→ `invalid thread.group regex`。
+4. **配置标量形态静默无效**：`group: 'thread-.*'`（标量而非列表）时 `getList("thread.group")` 读不到 `.0` 键
+   → 空列表 = 不归组，且无任何告警。tg.sh 首版生成配置就踩了这个坑。**这是 getList 的通用口径**（列表键
+   只读展平项），与 agentArgs 时代「白名单标量静默失效」同源，配置务必写列表形态（`- ` 开头）。
+5. 错误页中文注释在 sandbox 错误页显示为 `?`（字符集），不影响消息判定。
+
+### 还原记录
+
+- module `config.yml` 已从仓库默认版还原（`inject.filters`/`thread.group` 均移除）；旧版模块 jar 备份保留在
+  `/home/lys/fault-module-1.0.0.jar.bak-tg`；无残留 java 进程（8080 已释放）。
+- 数据库：`origin_thread_name` 列保留（升级 SQL 已执行，向后兼容）；TG 系列 `t_fault_record` 验证记录
+  （tag=tg0/tg1/tg3/tg4/tg5/tg7/tg13）与表4 的 TG8/TG9/TG11 错误记录保留备查。
+- 载荷保留：`GroupCases` + `runGroupCases`（test-app 为 gitignored 验证资源）+ `/home/lys/cf/tg/` 下
+  tg.sh 与各 step 脚本、logs/*.out，便于后续回归。
+
